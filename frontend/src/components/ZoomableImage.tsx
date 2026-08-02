@@ -2,13 +2,17 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 /** Fit-to-container image with wheel zoom (cursor-anchored), drag pan and
  * double-click fit/zoom toggle. Scale 1 = fit. */
-export function ZoomableImage({ src, alt, resetKey, onZoomChange }: {
+export function ZoomableImage({ src, alt, resetKey, filter, onZoomChange, onLoaded }: {
   src: string
   alt: string
   /** zoom/pan reset when this changes (not on src changes, so the src can be
    * swapped for a higher-res version mid-zoom) */
   resetKey: string
+  /** CSS filter applied to the image (live edit approximation) */
+  filter?: string
   onZoomChange?: (zoomed: boolean) => void
+  /** fires when a (new) src finishes loading */
+  onLoaded?: () => void
 }) {
   const container = useRef<HTMLDivElement>(null)
   const [t, setT] = useState({ scale: 1, x: 0, y: 0 })
@@ -104,10 +108,12 @@ export function ZoomableImage({ src, alt, resetKey, onZoomChange }: {
         src={src}
         alt={alt}
         draggable={false}
+        onLoad={onLoaded}
         className="max-h-full max-w-full object-contain"
         style={{
           transform: `translate(${t.x}px, ${t.y}px) scale(${t.scale})`,
           transition: drag.current ? 'none' : 'transform 120ms ease-out',
+          filter: filter || undefined,
         }}
       />
     </div>

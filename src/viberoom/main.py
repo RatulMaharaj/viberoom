@@ -17,7 +17,7 @@ from viberoom.config import Library, load_last_library, save_last_library
 from viberoom.engine.cache import render_preview
 from viberoom.engine.decode import extract_thumbnail
 from viberoom.export import export_jpeg
-from viberoom.recipe.schema import Recipe
+from viberoom.recipe.schema import Crop, Recipe
 from viberoom.recipe.sidecar import Flag, load_sidecar, save_sidecar
 
 app = FastAPI(title="viberoom", version="0.1.0")
@@ -61,6 +61,85 @@ def get_library() -> dict:
 def rescan(full: bool = False) -> dict:
     lib = state.require_library()
     return scan(lib, state.db(), full=full)
+
+
+# ---------- session: what the user is currently looking at ----------
+
+_current_image: str | None = None
+
+
+class CurrentIn(BaseModel):
+    image_id: str | None
+
+
+@api.put("/session/current")
+def set_current(body: CurrentIn) -> dict:
+    """The web UI reports the currently selected/open image here so agents
+    can act on \"the image I'm looking at\"."""
+    global _current_image
+    _current_image = body.image_id
+    return {"image_id": _current_image}
+
+
+@api.get("/session/current")
+def get_current() -> dict:
+    if _current_image is None:
+        return {"image_id": None, "image": None}
+    rows = state.db().query("SELECT * FROM images WHERE id=?", (_current_image,))
+    return {
+        "image_id": _current_image,
+        "image": _row_to_dict(rows[0]) if rows else None,
+    }
+
+
+# ---------- change events: push sidecar edits to the UI live ----------
+
+@api.get("/events")
+async def events():
+    """SSE stream of image ids whose sidecars changed on disk (agent edits,
+    manual edits). The UI listens and refreshes affected views."""
+    from sse_starlette.sse import EventSourceResponse
+    from watchfiles import awatch
+
+    from viberoom.catalog.scanner import image_id as make_id
+    from viberoom.recipe.sidecar import SIDECAR_SUFFIX
+
+    lib = state.require_library()
+
+    async def gen():
+        async for changes in awatch(lib.root, recursive=True):
+            ids = set()
+            for _, p in changes:
+                if p.endswith(SIDECAR_SUFFIX):
+                    try:
+                        rel = str(Path(p).relative_to(lib.root))[: -len(SIDECAR_SUFFIX)]
+                    except ValueError:
+                        continue
+                    iid = make_id(rel)
+                    _sync_sidecar_to_db(iid)
+                    ids.add(iid)
+            if ids:
+                yield {"event": "sidecar", "data": json.dumps(sorted(ids))}
+
+    return EventSourceResponse(gen())
+
+
+def _sync_sidecar_to_db(image_id: str) -> None:
+    """Refresh one image's DB row from its sidecar (external edit landed)."""
+    lib = state.library_or_none()
+    if lib is None:
+        return
+    rows = state.db().query("SELECT rel_path FROM images WHERE id=?", (image_id,))
+    if not rows:
+        return
+    path = lib.root / rows[0]["rel_path"]
+    sc = load_sidecar(path)
+    sc_path = path.with_name(path.name + ".vibe.json")
+    state.db().execute(
+        "UPDATE images SET rating=?, flag=?, has_edits=?, sidecar_mtime=? WHERE id=?",
+        (sc.rating, sc.flag, int(sc.recipe != Recipe()),
+         sc_path.stat().st_mtime if sc_path.exists() else None, image_id),
+    )
 
 
 # ---------- filesystem browser (for the folder picker UI) ----------
@@ -281,12 +360,17 @@ def preview(
     image_id: str,
     size: Annotated[int, Query(ge=256, le=4096)] = 1600,
     original: bool = False,
+    nocrop: bool = False,
 ) -> Response:
-    """Rendered preview with the recipe applied; original=true renders the
-    untouched image (for before/after comparison)."""
+    """Rendered preview with the recipe applied. original=true renders the
+    untouched image (before/after); nocrop=true keeps all edits but shows the
+    full frame (for the crop tool)."""
     lib = state.require_library()
     path = _image_path(image_id)
     recipe = Recipe() if original else load_sidecar(path).recipe
+    if nocrop:
+        recipe = recipe.model_copy(deep=True)
+        recipe.geometry.crop = Crop()
     data = render_preview(path, recipe, size, lib.cache_dir)
     return Response(content=data, media_type="image/jpeg")
 

@@ -1,4 +1,6 @@
-# viberoom
+# Viberoom
+
+> Agent-driven RAW photo manager and non-destructive editor — Lightroom-style library and develop tools, controlled by AI agents via MCP and REST.
 
 A developer-focused, agent-driven photo manager and RAW editor. Think Lightroom's
 library, minus the editing UI — **all edits are made by agents** (Claude Code,

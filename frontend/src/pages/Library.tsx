@@ -8,6 +8,8 @@ import { FolderPicker } from '../components/FolderPicker'
 import { ModuleTabs } from '../components/ModuleTabs'
 import { exifLine } from '../exif'
 import { loadFilters, saveFilters } from '../filters'
+import { onSidecarChange } from '../events'
+import { loadLastImage, saveLastImage } from '../selection'
 import { handleUndoKey, pushAction } from '../undo'
 
 export function Library() {
@@ -21,7 +23,11 @@ export function Library() {
       saveFilters(next)
       return next
     })
-  const [selected, setSelected] = useState<string | null>(null)
+  const [selected, setSelectedState] = useState<string | null>(loadLastImage)
+  const setSelected = (id: string | null) => {
+    setSelectedState(id)
+    saveLastImage(id)
+  }
   const [error, setError] = useState<string | null>(null)
   const [showPicker, setShowPicker] = useState(false)
   const [exts, setExts] = useState<string[]>([])
@@ -43,6 +49,9 @@ export function Library() {
       }
     })
   }, [refresh])
+
+  // live refresh when agents edit sidecars on disk
+  useEffect(() => onSidecarChange(() => refresh()), [refresh])
 
   const openLibrary = async (path: string) => {
     setError(null)

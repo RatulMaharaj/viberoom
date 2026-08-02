@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Download, Maximize, Minimize } from 'lucide-react'
+import { Crop, Download, Maximize, Minimize } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api, type Flag, type ImageMeta } from '../api'
 import { FlagBadge, RatingStars } from '../components/RatingStars'
 import { Brand } from '../components/Brand'
+import { CropTool } from '../components/CropTool'
 import { EditPanel } from '../components/EditPanel'
 import { ModuleTabs } from '../components/ModuleTabs'
 import { ZoomableImage } from '../components/ZoomableImage'
 import { cameraLine, exifLine } from '../exif'
 import { loadFilters } from '../filters'
+import { onSidecarChange } from '../events'
+import { loadLastImage, saveLastImage } from '../selection'
 import { handleUndoKey, pushAction } from '../undo'
 
 export function Edit() {
@@ -24,6 +27,9 @@ export function Edit() {
   const [hovered, setHovered] = useState<ImageMeta | null>(null)
   const [showBefore, setShowBefore] = useState(false)
   const [panelVersion, setPanelVersion] = useState(0)
+  const [liveFilter, setLiveFilter] = useState('')
+  const [renderTick, setRenderTick] = useState(0)
+  const [cropMode, setCropMode] = useState(false)
 
   const refreshAll = useCallback(() => {
     setBust(String(Date.now()))
@@ -43,9 +49,14 @@ export function Edit() {
 
   // filmstrip honors the same filters as the Organize grid
   useEffect(() => {
+    saveLastImage(id ?? null)
     api.listImages(loadFilters()).then((r) => {
       setSiblings(r.images)
-      if (!id && r.images.length) navigate(`/edit/${r.images[0].id}`, { replace: true })
+      if (!id && r.images.length) {
+        const last = loadLastImage()
+        const target = last && r.images.some((im) => im.id === last) ? last : r.images[0].id
+        navigate(`/edit/${target}`, { replace: true })
+      }
     })
   }, [id, navigate])
 
@@ -72,16 +83,30 @@ export function Edit() {
     return () => document.removeEventListener('fullscreenchange', onChange)
   }, [])
 
+  // live refresh when an agent (or anything) edits sidecars on disk
+  useEffect(
+    () =>
+      onSidecarChange((ids) => {
+        if (id && ids.includes(id)) refreshAll()
+      }),
+    [id, refreshAll],
+  )
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey) {
         handleUndoKey(e).then((consumed) => consumed && refreshAll())
         return
       }
+      if (cropMode) {
+        if (e.key === 'Escape' || e.key.toLowerCase() === 'c') setCropMode(false)
+        return
+      }
       if (e.key === 'ArrowRight') go(1)
       else if (e.key === 'ArrowLeft') go(-1)
       else if (e.key.toLowerCase() === 'f') toggleFullscreen()
       else if (e.key === '\\' || e.key === '|') setShowBefore((v) => !v)
+      else if (e.key.toLowerCase() === 'c') setCropMode(true)
       else if (e.key === 'Escape' || e.key.toLowerCase() === 'g') {
         // browser handles exiting native fullscreen on Esc itself
         if (!document.fullscreenElement) navigate('/')
@@ -97,7 +122,7 @@ export function Edit() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [go, id, image, load, navigate, toggleFullscreen, refreshAll])
+  }, [go, id, image, load, navigate, toggleFullscreen, refreshAll, cropMode])
 
   const setRating = (rating: number) => {
     if (!id || !image) return
@@ -135,7 +160,6 @@ export function Edit() {
       {!fullscreen && (
         <div className="navbar bg-base-200 gap-2 px-4 min-h-12">
           <Brand />
-          <span className="font-mono text-sm truncate">{image?.filename}</span>
           <div className="flex-1" />
           {image && (
             <>
@@ -143,6 +167,14 @@ export function Edit() {
               <FlagBadge flag={image.flag} onChange={setFlag} />
             </>
           )}
+          <button
+            className={`btn btn-sm ${cropMode ? 'btn-primary' : 'btn-ghost'}`}
+            title="Crop & straighten (C)"
+            onClick={() => setCropMode((v) => !v)}
+            disabled={!id}
+          >
+            <Crop size={14} />
+          </button>
           <button className="btn btn-sm btn-ghost" title="Fullscreen (F)" onClick={toggleFullscreen}>
             <Maximize size={14} />
           </button>
@@ -175,7 +207,9 @@ export function Edit() {
             resetKey={id}
             src={api.previewUrl(id, zoomed ? 4096 : 2048, bust, showBefore)}
             alt={image?.filename ?? ''}
+            filter={liveFilter}
             onZoomChange={setZoomed}
+            onLoaded={() => setRenderTick((t) => t + 1)}
           />
         )}
         {showBefore && (
@@ -184,6 +218,13 @@ export function Edit() {
           </span>
         )}
         {!id && <p className="opacity-60">No images match the current filters.</p>}
+        {cropMode && id && (
+          <CropTool
+            imageId={id}
+            onClose={() => setCropMode(false)}
+            onApplied={refreshAll}
+          />
+        )}
         {fullscreen && image && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-3 bg-base-100/80 rounded-full px-4 py-1.5 backdrop-blur">
             <span className="font-mono text-xs">{image.filename}</span>
@@ -202,6 +243,8 @@ export function Edit() {
           isRaw={image?.is_raw ?? false}
           hasEdits={image?.has_edits ?? false}
           version={panelVersion}
+          renderTick={renderTick}
+          onLiveFilter={setLiveFilter}
           onRecipeChange={() => {
             setBust(String(Date.now()))
             load()

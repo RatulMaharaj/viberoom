@@ -1,9 +1,12 @@
 import { LayoutGrid, SlidersHorizontal } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { loadLastImage } from '../selection'
+import { AgentInfoButton } from './AgentInfo'
 
 export function ModuleTabs({ active, imageId }: { active: 'catalog' | 'develop'; imageId?: string }) {
   const navigate = useNavigate()
   return (
+    <div className="flex items-center gap-1 shrink-0">
     <div className="join shrink-0">
       <button
         className={`btn btn-sm join-item ${active === 'catalog' ? 'btn-primary' : ''}`}
@@ -13,10 +16,15 @@ export function ModuleTabs({ active, imageId }: { active: 'catalog' | 'develop';
       </button>
       <button
         className={`btn btn-sm join-item ${active === 'develop' ? 'btn-primary' : ''}`}
-        onClick={() => navigate(imageId ? `/edit/${imageId}` : '/edit')}
+        onClick={() => {
+          const target = imageId ?? loadLastImage()
+          navigate(target ? `/edit/${target}` : '/edit')
+        }}
       >
         <SlidersHorizontal size={14} /> Develop
       </button>
+    </div>
+    <AgentInfoButton />
     </div>
   )
 }

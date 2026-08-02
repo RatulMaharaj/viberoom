@@ -59,6 +59,14 @@ def list_images(
 
 
 @mcp.tool()
+def get_current_image() -> dict:
+    """The image the user currently has selected/open in the Viberoom web UI
+    (or image_id: null if nothing is selected). Use this when the user says
+    'this image' / 'my current image'."""
+    return _call("GET", "/session/current").json()
+
+
+@mcp.tool()
 def get_image(image_id: str) -> dict:
     """Full metadata for one image: path, EXIF, rating, flag, edit status."""
     return _call("GET", f"/images/{image_id}").json()

@@ -33,7 +33,146 @@
   --color-error: #c96f6f;
   --color-error-content: #1d1010;
 
-  --radius-selector: 0.25rem;
-  --radius-field: 0.25rem;
-  --radius-box: 0.375rem;
+  --radius-selector: 0rem;
+  --radius-field: 0rem;
+  --radius-box: 0rem;
+  --border: 1px;
+}
+
+/* Brutalist controls: sharp corners, hard borders, flat fills, and a
+ * physical press — hover lifts with a hard offset shadow, click slams flat. */
+.btn {
+  border-radius: 0;
+  border: 1px solid color-mix(in srgb, var(--color-base-content) 35%, transparent);
+  box-shadow: none;
+  transition: transform 80ms, box-shadow 80ms;
+}
+.btn:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--color-base-content) 45%, transparent);
+}
+.btn:active:not(:disabled) {
+  transform: translate(1px, 1px);
+  box-shadow: none;
+}
+.btn-ghost {
+  border-color: transparent;
+}
+.btn-ghost:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-base-content) 35%, transparent);
+}
+.btn-primary {
+  border-color: var(--color-primary);
+}
+.join .join-item.btn {
+  margin-inline-start: -1px; /* collapse doubled borders in joined groups */
+}
+.badge {
+  border-radius: 0;
+}
+.select,
+.input {
+  border-radius: 0;
+}
+.modal-box {
+  border: 1px solid color-mix(in srgb, var(--color-base-content) 30%, transparent);
+  box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.35);
+}
+
+/* Thin minimal develop sliders: hairline track, small round thumb,
+ * brightens on hover — Lightroom-style understatement. */
+.vr-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 14px;
+  background: transparent;
+  cursor: pointer;
+}
+.vr-slider::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--color-base-content) 25%, transparent);
+}
+.vr-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  margin-top: -4px;
+  border-radius: 50%;
+  border: none;
+  background: color-mix(in srgb, var(--color-base-content) 75%, transparent);
+  transition: background 100ms, transform 100ms;
+}
+.vr-slider:hover::-webkit-slider-thumb,
+.vr-slider:focus-visible::-webkit-slider-thumb {
+  background: var(--color-base-content);
+  transform: scale(1.2);
+}
+.vr-slider:hover::-webkit-slider-runnable-track {
+  background: color-mix(in srgb, var(--color-base-content) 40%, transparent);
+}
+.vr-slider:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+.vr-slider::-moz-range-track {
+  height: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--color-base-content) 25%, transparent);
+}
+.vr-slider::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: none;
+  background: color-mix(in srgb, var(--color-base-content) 75%, transparent);
+  transition: background 100ms, transform 100ms;
+}
+.vr-slider:hover::-moz-range-thumb,
+.vr-slider:focus-visible::-moz-range-thumb {
+  background: var(--color-base-content);
+  transform: scale(1.2);
+}
+.vr-slider:hover::-moz-range-track {
+  background: color-mix(in srgb, var(--color-base-content) 40%, transparent);
+}
+
+/* Colored rails for white balance, like Lightroom */
+.vr-slider-temp::-webkit-slider-runnable-track,
+.vr-slider-temp:hover::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, #5b8fd9, #9b968a, #e6923e);
+}
+.vr-slider-temp::-moz-range-track,
+.vr-slider-temp:hover::-moz-range-track {
+  background: linear-gradient(to right, #5b8fd9, #9b968a, #e6923e);
+}
+.vr-slider-tint::-webkit-slider-runnable-track,
+.vr-slider-tint:hover::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, #6fbf5f, #9b968a, #e070b8);
+}
+.vr-slider-tint::-moz-range-track,
+.vr-slider-tint:hover::-moz-range-track {
+  background: linear-gradient(to right, #6fbf5f, #9b968a, #e070b8);
+}
+/* dark-to-light for tone sliders */
+.vr-slider-luma::-webkit-slider-runnable-track,
+.vr-slider-luma:hover::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, #1c1c1c, #6a6a6a, #e0e0e0);
+}
+.vr-slider-luma::-moz-range-track,
+.vr-slider-luma:hover::-moz-range-track {
+  background: linear-gradient(to right, #1c1c1c, #6a6a6a, #e0e0e0);
+}
+/* grey-to-colorful for saturation/vibrance */
+.vr-slider-sat::-webkit-slider-runnable-track,
+.vr-slider-sat:hover::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, #8c8c8c 0%, #8c8c8c 45%,
+    #c96f6f 60%, #c9b16f 70%, #7fae6f 80%, #6f9fc9 90%, #b56fc9 100%);
+}
+.vr-slider-sat::-moz-range-track,
+.vr-slider-sat:hover::-moz-range-track {
+  background: linear-gradient(to right, #8c8c8c 0%, #8c8c8c 45%,
+    #c96f6f 60%, #c9b16f 70%, #7fae6f 80%, #6f9fc9 90%, #b56fc9 100%);
 }

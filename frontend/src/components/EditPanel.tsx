@@ -11,32 +11,34 @@ interface SliderDef {
   max: number
   step: number
   def: number
+  /** colored rail hinting at the axis: temp, tint, dark-to-light, saturation */
+  rail?: 'temp' | 'tint' | 'luma' | 'sat'
 }
 
 const GROUPS: { title: string; sliders: SliderDef[] }[] = [
   {
     title: 'White Balance',
     sliders: [
-      { label: 'Temp', path: ['whiteBalance', 'temp'], min: 2000, max: 20000, step: 50, def: 5500 },
-      { label: 'Tint', path: ['whiteBalance', 'tint'], min: -150, max: 150, step: 1, def: 0 },
+      { label: 'Temp', path: ['whiteBalance', 'temp'], min: 2000, max: 20000, step: 50, def: 5500, rail: 'temp' },
+      { label: 'Tint', path: ['whiteBalance', 'tint'], min: -150, max: 150, step: 1, def: 0, rail: 'tint' },
     ],
   },
   {
     title: 'Tone',
     sliders: [
-      { label: 'Exposure', path: ['tone', 'exposure'], min: -5, max: 5, step: 0.05, def: 0 },
+      { label: 'Exposure', path: ['tone', 'exposure'], min: -5, max: 5, step: 0.05, def: 0, rail: 'luma' },
       { label: 'Contrast', path: ['tone', 'contrast'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Highlights', path: ['tone', 'highlights'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Shadows', path: ['tone', 'shadows'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Whites', path: ['tone', 'whites'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Blacks', path: ['tone', 'blacks'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Highlights', path: ['tone', 'highlights'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+      { label: 'Shadows', path: ['tone', 'shadows'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+      { label: 'Whites', path: ['tone', 'whites'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+      { label: 'Blacks', path: ['tone', 'blacks'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
     ],
   },
   {
     title: 'Presence',
     sliders: [
-      { label: 'Vibrance', path: ['color', 'vibrance'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Saturation', path: ['color', 'saturation'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Vibrance', path: ['color', 'vibrance'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
+      { label: 'Saturation', path: ['color', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
     ],
   },
   {
@@ -53,13 +55,30 @@ const getAt = (obj: any, path: string[]) => path.reduce((o, k) => o?.[k], obj)
 const patchFor = (path: string[], value: number | null): object =>
   path.reduceRight<any>((v, k) => ({ [k]: v }), value)
 
+/** CSS-filter approximation of the DIFFERENCE between the current recipe and
+ * the last server-rendered one — instant feedback while dragging, replaced by
+ * the accurate render when it arrives. Covers exposure/contrast/sat/vibrance. */
+function liveDeltaFilter(cur: any, base: any): string {
+  const parts: string[] = []
+  const dev = (cur?.tone?.exposure ?? 0) - (base?.tone?.exposure ?? 0)
+  if (Math.abs(dev) > 1e-3) parts.push(`brightness(${Math.pow(2, dev).toFixed(3)})`)
+  const dc = (cur?.tone?.contrast ?? 0) - (base?.tone?.contrast ?? 0)
+  if (Math.abs(dc) > 0.5) parts.push(`contrast(${(1 + (dc / 100) * 0.5).toFixed(3)})`)
+  const sat = (r: any) => 1 + (r?.color?.saturation ?? 0) / 100 + (r?.color?.vibrance ?? 0) / 200
+  const ds = sat(cur) / sat(base)
+  if (Math.abs(ds - 1) > 1e-3) parts.push(`saturate(${Math.max(0, ds).toFixed(3)})`)
+  return parts.join(' ')
+}
+
 export function EditPanel({
   imageId,
   previewSrc,
   isRaw,
   hasEdits,
   version = 0,
+  renderTick = 0,
   onRecipeChange,
+  onLiveFilter,
 }: {
   imageId: string
   previewSrc: string
@@ -67,18 +86,44 @@ export function EditPanel({
   hasEdits: boolean
   /** bump to force a recipe refetch (e.g. after undo/redo) */
   version?: number
+  /** bumped by the parent each time a fresh preview render finishes loading */
+  renderTick?: number
   onRecipeChange: () => void
+  /** instant CSS-filter feedback while dragging (cleared when render lands) */
+  onLiveFilter?: (filter: string) => void
 }) {
-  const [recipe, setRecipe] = useState<Record<string, any> | null>(null)
+  const [recipe, setRecipeState] = useState<Record<string, any> | null>(null)
+  const recipeRef = useRef<Record<string, any> | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSaved = useRef<Record<string, any> | null>(null)
+  // recipe of the render currently on screen — the CSS live filter is always
+  // the delta between the slider state and THIS, so approximation and pixels
+  // never fight each other
+  const displayed = useRef<Record<string, any> | null>(null)
+
+  const setRecipe = (r: Record<string, any>) => {
+    recipeRef.current = r
+    setRecipeState(r)
+  }
 
   useEffect(() => {
     api.getRecipe(imageId).then((r) => {
       setRecipe(r)
       lastSaved.current = r
+      displayed.current = r
+      onLiveFilter?.('')
     })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageId, version])
+
+  // a fresh server render finished loading: it reflects lastSaved, so the
+  // approximation only needs to cover edits made since then (usually none)
+  useEffect(() => {
+    if (renderTick === 0) return
+    displayed.current = lastSaved.current
+    onLiveFilter?.(liveDeltaFilter(recipeRef.current, displayed.current))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderTick])
 
   const record = (id: string, prev: Record<string, any>, next: Record<string, any>) =>
     pushAction({
@@ -89,23 +134,24 @@ export function EditPanel({
   const commit = (patch: object) => {
     if (timer.current) clearTimeout(timer.current)
     timer.current = setTimeout(async () => {
+      timer.current = null
       const prev = lastSaved.current
       const updated = await api.patchRecipe(imageId, patch)
       if (prev) record(imageId, prev, updated)
       lastSaved.current = updated
-      setRecipe(updated)
-      onRecipeChange()
-    }, 250)
+      // trigger a render only if no newer edit is already pending — while
+      // dragging, intermediate states are covered by the CSS approximation
+      if (!timer.current) onRecipeChange()
+    }, 300)
   }
 
   const setValue = (def: SliderDef, value: number) => {
-    setRecipe((r) => {
-      const next = structuredClone(r ?? {})
-      let o: any = next
-      for (const k of def.path.slice(0, -1)) o = o[k] ?? (o[k] = {})
-      o[def.path[def.path.length - 1]] = value
-      return next
-    })
+    const next = structuredClone(recipeRef.current ?? {})
+    let o: any = next
+    for (const k of def.path.slice(0, -1)) o = o[k] ?? (o[k] = {})
+    o[def.path[def.path.length - 1]] = value
+    setRecipe(next)
+    onLiveFilter?.(liveDeltaFilter(next, displayed.current))
     commit(patchFor(def.path, value))
   }
 
@@ -181,7 +227,7 @@ export function EditPanel({
                 </div>
                 <input
                   type="range"
-                  className="range range-xs range-primary w-full"
+                  className={`vr-slider ${s.rail ? `vr-slider-${s.rail}` : ''}`}
                   min={s.min}
                   max={s.max}
                   step={s.step}
@@ -198,11 +244,9 @@ export function EditPanel({
                       checked={asShot}
                       onChange={(e) => {
                         if (e.target.checked) {
-                          setRecipe((r) => {
-                            const next = structuredClone(r ?? {})
-                            next.whiteBalance = { ...next.whiteBalance, temp: null }
-                            return next
-                          })
+                          const next = structuredClone(recipeRef.current ?? {})
+                          next.whiteBalance = { ...next.whiteBalance, temp: null }
+                          setRecipe(next)
                           commit({ whiteBalance: { temp: null } })
                         } else {
                           setValue(s, s.def)
