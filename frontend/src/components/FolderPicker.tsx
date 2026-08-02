@@ -49,7 +49,7 @@ export function FolderPicker({
           {dirs.map((d) => (
             <li key={d}>
               <button className="font-mono text-sm" onClick={() => load(d)}>
-                <Folder size={14} /> {current ? name(d) : d}
+                <Folder size={14} fill="#e8b339" stroke="#e8b339" /> {current ? name(d) : d}
               </button>
             </li>
           ))}

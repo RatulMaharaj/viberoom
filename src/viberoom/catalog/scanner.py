@@ -7,41 +7,19 @@ import json
 import os
 from pathlib import Path
 
-from PIL import ExifTags, Image
-
 from viberoom.catalog.db import CatalogDB
+from viberoom.catalog.metadata import read_metadata
 from viberoom.config import IMAGE_EXTENSIONS, Library, is_raw
 from viberoom.recipe.schema import Recipe
 from viberoom.recipe.sidecar import SIDECAR_SUFFIX, load_sidecar, sidecar_path
-
-_EXIF_KEEP = {
-    "Make", "Model", "LensModel", "DateTimeOriginal", "ExposureTime",
-    "FNumber", "ISOSpeedRatings", "PhotographicSensitivity", "FocalLength",
-}
-
 
 def image_id(rel_path: str) -> str:
     return hashlib.sha1(rel_path.encode()).hexdigest()[:16]
 
 
-def _read_exif(path: Path) -> tuple[int | None, int | None, dict]:
-    """Best-effort dimensions + basic EXIF via Pillow (works for RAW headers
-    on some formats; failures are fine — EXIF is cosmetic metadata here)."""
-    try:
-        with Image.open(path) as im:
-            exif = im.getexif()
-            tags = {}
-            for tag_id, value in exif.items():
-                name = ExifTags.TAGS.get(tag_id)
-                if name in _EXIF_KEEP:
-                    tags[name] = str(value)
-            return im.width, im.height, tags
-    except Exception:
-        return None, None, {}
-
-
-def scan(library: Library, db: CatalogDB) -> dict:
-    """Walk the library, upsert changed files, sync sidecars, prune deleted."""
+def scan(library: Library, db: CatalogDB, full: bool = False) -> dict:
+    """Walk the library, upsert changed files, sync sidecars, prune deleted.
+    full=True re-reads metadata for every file even if unchanged."""
     seen: set[str] = set()
     added = updated = 0
 
@@ -59,11 +37,11 @@ def scan(library: Library, db: CatalogDB) -> dict:
             sc_mtime = sc_path.stat().st_mtime if sc_path.exists() else None
 
             row = db.query("SELECT mtime, sidecar_mtime FROM images WHERE id=?", (iid,))
-            if row and row[0]["mtime"] == stat.st_mtime and row[0]["sidecar_mtime"] == sc_mtime:
+            if not full and row and row[0]["mtime"] == stat.st_mtime and row[0]["sidecar_mtime"] == sc_mtime:
                 continue
 
             sc = load_sidecar(p)
-            width, height, exif = _read_exif(p)
+            width, height, exif = read_metadata(p)
             db.execute(
                 """INSERT INTO images (id, rel_path, filename, ext, is_raw, filesize,
                        mtime, width, height, exif_json, rating, flag, has_edits, sidecar_mtime)

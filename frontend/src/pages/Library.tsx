@@ -3,9 +3,12 @@ import { ArrowDown, ArrowUp, FolderOpen, RefreshCw } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { api, type Filters, type Flag, type ImageMeta } from '../api'
 import { FlagBadge, RatingStars } from '../components/RatingStars'
+import { Brand } from '../components/Brand'
 import { FolderPicker } from '../components/FolderPicker'
 import { ModuleTabs } from '../components/ModuleTabs'
+import { exifLine } from '../exif'
 import { loadFilters, saveFilters } from '../filters'
+import { handleUndoKey, pushAction } from '../undo'
 
 export function Library() {
   const [libraryPath, setLibraryPath] = useState<string | null>(null)
@@ -57,10 +60,20 @@ export function Library() {
     setImages((imgs) => imgs.map((im) => (im.id === id ? { ...im, ...patch } : im)))
 
   const setRating = (id: string, rating: number) => {
+    const prev = images.find((im) => im.id === id)?.rating ?? 0
+    pushAction({
+      undo: () => api.setRating(id, prev),
+      redo: () => api.setRating(id, rating),
+    })
     patchLocal(id, { rating })
     api.setRating(id, rating)
   }
   const setFlag = (id: string, flag: Flag) => {
+    const prev = images.find((im) => im.id === id)?.flag ?? null
+    pushAction({
+      undo: () => api.setFlag(id, prev),
+      redo: () => api.setFlag(id, flag),
+    })
     patchLocal(id, { flag })
     api.setFlag(id, flag)
   }
@@ -68,6 +81,10 @@ export function Library() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return
+      if (e.metaKey || e.ctrlKey) {
+        handleUndoKey(e).then((consumed) => consumed && refresh())
+        return
+      }
       // arrow keys move the selection like Lightroom's grid
       if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
         e.preventDefault()
@@ -86,13 +103,13 @@ export function Library() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, images])
+  }, [selected, images, refresh])
 
   if (!libraryPath) {
     return (
       <div className="hero min-h-screen">
         <div className="hero-content flex-col">
-          <h1 className="text-4xl font-bold">viberoom</h1>
+          <h1 className="text-4xl font-bold">Viberoom</h1>
           <p className="opacity-70">Point at a local folder of photos to get started.</p>
           <div className="join w-full max-w-xl">
             <input
@@ -107,7 +124,7 @@ export function Library() {
             </button>
           </div>
           <button className="btn btn-ghost btn-sm" onClick={() => setShowPicker(true)}>
-            <FolderOpen size={14} /> Browse folders…
+            <FolderOpen size={14} fill="#e8b339" stroke="#e8b339" /> Browse folders…
           </button>
           {error && <div className="alert alert-error text-sm">{error}</div>}
           {showPicker && (
@@ -121,21 +138,7 @@ export function Library() {
   return (
     <div className="min-h-screen">
       <div className="navbar bg-base-200 sticky top-0 z-10 gap-2 px-4">
-        <span className="font-bold text-lg">viberoom</span>
-        <button
-          className="btn btn-sm btn-ghost gap-1.5 font-normal"
-          title={`${libraryPath} — click to change folder`}
-          onClick={() => setShowPicker(true)}
-        >
-          <FolderOpen size={14} className="opacity-60" />
-          <span className="max-w-40 truncate">
-            {libraryPath.split('/').filter(Boolean).pop()}
-          </span>
-        </button>
-        {showPicker && (
-          <FolderPicker onSelect={openLibrary} onClose={() => setShowPicker(false)} />
-        )}
-        <ModuleTabs active="organize" imageId={selected ?? undefined} />
+        <Brand />
         <div className="flex-1" />
         <select
           className="select select-sm select-bordered"
@@ -178,9 +181,9 @@ export function Library() {
             </option>
           ))}
         </select>
-        <div className="join">
+        <div className="flex items-center gap-1">
           <select
-            className="select select-sm select-bordered join-item"
+            className="select select-sm select-bordered w-28"
             value={filters.sort}
             onChange={(e) => setFilters((f) => ({ ...f, sort: e.target.value as Filters['sort'] }))}
           >
@@ -189,7 +192,7 @@ export function Library() {
             <option value="rating">Rating</option>
           </select>
           <button
-            className="btn btn-sm join-item"
+            className="btn btn-sm btn-square"
             title={filters.order === 'asc' ? 'Ascending — click for descending' : 'Descending — click for ascending'}
             onClick={() =>
               setFilters((f) => ({ ...f, order: f.order === 'asc' ? 'desc' : 'asc' }))
@@ -201,6 +204,8 @@ export function Library() {
         <button className="btn btn-sm" onClick={() => api.scan().then(refresh)}>
           <RefreshCw size={14} /> Rescan
         </button>
+        <div className="divider divider-horizontal mx-0" />
+        <ModuleTabs active="catalog" imageId={selected ?? undefined} />
       </div>
 
       <div className="p-4 grid gap-4 grid-cols-[repeat(auto-fill,minmax(220px,1fr))]">
@@ -213,13 +218,18 @@ export function Library() {
             onClick={() => setSelected(im.id)}
             onDoubleClick={() => navigate(`/edit/${im.id}`)}
           >
-            <figure className="aspect-[3/2] bg-base-300">
+            <figure className="aspect-[3/2] bg-base-300 relative group">
               <img
                 src={api.thumbnailUrl(im.id)}
                 alt={im.filename}
                 loading="lazy"
                 className="object-cover w-full h-full"
               />
+              {exifLine(im.exif) && (
+                <div className="absolute inset-x-0 bottom-0 bg-black/70 text-[10px] font-mono text-white/90 px-2 py-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  {exifLine(im.exif)}
+                </div>
+              )}
             </figure>
             <div className="card-body p-3 gap-1">
               <div className="flex items-center justify-between gap-2">
@@ -240,7 +250,7 @@ export function Library() {
           <p className="opacity-60 col-span-full text-center py-16">No images match.</p>
         )}
       </div>
-      <div className="fixed bottom-2 right-4 text-xs opacity-40 font-mono">
+      <div className="fixed bottom-2 right-4 text-xs font-mono text-base-content/60 bg-base-200/80 backdrop-blur rounded-full px-3 py-1.5 shadow">
         ←→ select · 0-5 rate · P pick · X reject · U unflag · E/Enter loupe
       </div>
     </div>

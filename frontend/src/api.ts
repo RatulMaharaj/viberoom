@@ -79,7 +79,34 @@ export const api = {
       body: JSON.stringify({ flag }),
     }).then((r) => json<object>(r)),
 
-  getRecipe: (id: string) => fetch(`${BASE}/images/${id}/recipe`).then((r) => json<object>(r)),
+  getRecipe: (id: string) =>
+    fetch(`${BASE}/images/${id}/recipe`).then((r) => json<Record<string, any>>(r)),
+
+  putRecipe: (id: string, recipe: object) =>
+    fetch(`${BASE}/images/${id}/recipe`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(recipe),
+    }).then((r) => json<Record<string, any>>(r)),
+
+  patchRecipe: (id: string, patch: object) =>
+    fetch(`${BASE}/images/${id}/recipe`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).then((r) => json<Record<string, any>>(r)),
+
+  autoAdjust: (id: string) =>
+    fetch(`${BASE}/images/${id}/auto`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ white_balance: true }),
+    }).then((r) => json<Record<string, any>>(r)),
+
+  resetRecipe: (id: string) =>
+    fetch(`${BASE}/images/${id}/recipe`, { method: 'DELETE' }).then((r) =>
+      json<Record<string, any>>(r),
+    ),
 
   exportImage: (id: string, opts: { quality?: number; max_dimension?: number } = {}) =>
     fetch(`${BASE}/images/${id}/export`, {
@@ -89,6 +116,6 @@ export const api = {
     }).then((r) => json<{ path: string }>(r)),
 
   thumbnailUrl: (id: string) => `${BASE}/images/${id}/thumbnail`,
-  previewUrl: (id: string, size = 1600, bust = '') =>
-    `${BASE}/images/${id}/preview?size=${size}${bust ? `&t=${bust}` : ''}`,
+  previewUrl: (id: string, size = 1600, bust = '', original = false) =>
+    `${BASE}/images/${id}/preview?size=${size}${original ? '&original=true' : ''}${bust ? `&t=${bust}` : ''}`,
 }

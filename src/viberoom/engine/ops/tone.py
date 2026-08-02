@@ -36,8 +36,10 @@ def apply_regions(img: np.ndarray, tone: Tone) -> np.ndarray:
             # lift brights toward white
             out = out + (tone.highlights / 100) * 0.4 * mask * np.clip(1 - out, 0, 1)
     if tone.shadows:
-        mask = (1 - luma) ** 2  # weights dark regions
-        out = out + (tone.shadows / 100) * 0.35 * mask
+        mask = (1 - luma) ** 3  # weights true shadows, less midtone bleed
+        # taper by (0.5 - out): lifts darks, barely touches anything brighter,
+        # and cannot push shadows past mid-gray even at +100
+        out = out + (tone.shadows / 100) * 0.35 * mask * np.clip(0.5 - out, 0, None)
     if tone.whites:
         mask = np.clip(luma * 1.5 - 0.5, 0, 1) ** 3
         out = out + (tone.whites / 100) * 0.5 * mask * (1.2 - out)

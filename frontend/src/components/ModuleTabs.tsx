@@ -1,23 +1,21 @@
 import { LayoutGrid, SlidersHorizontal } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 
-export function ModuleTabs({ active, imageId }: { active: 'organize' | 'edit'; imageId?: string }) {
+export function ModuleTabs({ active, imageId }: { active: 'catalog' | 'develop'; imageId?: string }) {
   const navigate = useNavigate()
   return (
-    <div role="tablist" className="tabs tabs-box tabs-sm">
+    <div className="join shrink-0">
       <button
-        role="tab"
-        className={`tab ${active === 'organize' ? 'tab-active' : ''}`}
+        className={`btn btn-sm join-item ${active === 'catalog' ? 'btn-primary' : ''}`}
         onClick={() => navigate('/')}
       >
-        <LayoutGrid size={14} className="mr-1" /> Organize
+        <LayoutGrid size={14} /> Catalog
       </button>
       <button
-        role="tab"
-        className={`tab ${active === 'edit' ? 'tab-active' : ''}`}
+        className={`btn btn-sm join-item ${active === 'develop' ? 'btn-primary' : ''}`}
         onClick={() => navigate(imageId ? `/edit/${imageId}` : '/edit')}
       >
-        <SlidersHorizontal size={14} className="mr-1" /> Edit
+        <SlidersHorizontal size={14} /> Develop
       </button>
     </div>
   )

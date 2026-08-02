@@ -111,6 +111,15 @@ def set_recipe(image_id: str, recipe: dict) -> dict:
 
 
 @mcp.tool()
+def auto_adjust(image_id: str, white_balance: bool = True) -> dict:
+    """Computational auto-adjust: analyzes the image (exposure targeting,
+    percentile tone recovery, gray-world WB) and sets whiteBalance/tone/
+    vibrance. Keeps existing detail and geometry settings. Returns the new
+    recipe — render_preview afterwards to judge the result."""
+    return _call("POST", f"/images/{image_id}/auto", json={"white_balance": white_balance}).json()
+
+
+@mcp.tool()
 def reset_recipe(image_id: str) -> dict:
     """Remove all edits, restoring the image to its unedited state."""
     return _call("DELETE", f"/images/{image_id}/recipe").json()

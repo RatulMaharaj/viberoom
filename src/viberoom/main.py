@@ -58,9 +58,9 @@ def get_library() -> dict:
 
 
 @api.post("/library/scan")
-def rescan() -> dict:
+def rescan(full: bool = False) -> dict:
     lib = state.require_library()
-    return scan(lib, state.db())
+    return scan(lib, state.db(), full=full)
 
 
 # ---------- filesystem browser (for the folder picker UI) ----------
@@ -239,6 +239,27 @@ def reset_recipe(image_id: str) -> dict:
     return Recipe().model_dump(mode="json")
 
 
+class AutoIn(BaseModel):
+    white_balance: bool = True
+
+
+@api.post("/images/{image_id}/auto")
+def auto_adjust(image_id: str, body: AutoIn | None = None) -> dict:
+    """Computational auto: analyze the image and set WB/tone/vibrance.
+    Preserves any existing detail/geometry settings."""
+    from viberoom.engine.auto import compute_auto_recipe
+    from viberoom.engine.cache import _decode_cache
+
+    path = _image_path(image_id)
+    linear = _decode_cache.get(path, half_size=True)
+    auto = compute_auto_recipe(linear, white_balance=body.white_balance if body else True)
+    current = load_sidecar(path).recipe
+    auto.detail = current.detail
+    auto.geometry = current.geometry
+    _update_sidecar(image_id, recipe=auto)
+    return auto.model_dump(mode="json")
+
+
 # ---------- previews ----------
 
 @api.get("/images/{image_id}/thumbnail")
@@ -256,10 +277,16 @@ def thumbnail(image_id: str) -> Response:
 
 
 @api.get("/images/{image_id}/preview")
-def preview(image_id: str, size: Annotated[int, Query(ge=256, le=4096)] = 1600) -> Response:
+def preview(
+    image_id: str,
+    size: Annotated[int, Query(ge=256, le=4096)] = 1600,
+    original: bool = False,
+) -> Response:
+    """Rendered preview with the recipe applied; original=true renders the
+    untouched image (for before/after comparison)."""
     lib = state.require_library()
     path = _image_path(image_id)
-    recipe = load_sidecar(path).recipe
+    recipe = Recipe() if original else load_sidecar(path).recipe
     data = render_preview(path, recipe, size, lib.cache_dir)
     return Response(content=data, media_type="image/jpeg")
 

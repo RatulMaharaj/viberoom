@@ -38,8 +38,12 @@ class DecodeCache:
 _decode_cache = DecodeCache()
 
 
+# bump when pipeline math changes so cached previews re-render
+PIPELINE_VERSION = 2
+
+
 def preview_cache_key(path: Path, recipe: Recipe, size: int) -> str:
-    raw = f"{path}|{path.stat().st_mtime}|{recipe.canonical_json()}|{size}"
+    raw = f"v{PIPELINE_VERSION}|{path}|{path.stat().st_mtime}|{recipe.canonical_json()}|{size}"
     return hashlib.sha1(raw.encode()).hexdigest()
 
 
