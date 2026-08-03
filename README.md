@@ -223,6 +223,27 @@ uv run viberoom-bench chart --recipe my.json --max-delta-e 2.0
 uv run viberoom-bench chart --image chart.cr2 --corners 120,80,980,92,975,690,115,678
 ```
 
+**Auto** — degrade a decoded image by a known amount, ask `compute_auto_recipe`
+to fix it, and score against the original. Exact ground truth, no dataset.
+
+```bash
+uv run viberoom-bench auto                     # white balance (the fair test)
+uv run viberoom-bench auto --strategy auto     # whole recipe (diagnostic only)
+```
+
+The two strategies are not equally meaningful, and the tool says so in its
+own output:
+
+- `wb` (default) is a real pass/fail. Gray-world white balance genuinely is a
+  recovery algorithm, so a colour cast has a correct answer. Currently 13/14
+  cases improve, +5.4 dB PSNR and −1.8 dE on warm and cool casts.
+- `auto` is **diagnostic only**. `compute_auto_recipe` targets an absolute
+  rendering rather than undoing its input, so a low recovery score penalises
+  it for having a target instead of catching a bug — it scores 13/42 here
+  while its proposals on the undegraded originals are sensible. Use it to
+  spot clamp saturation and sign errors, not to judge quality. Judging auto
+  properly needs expert retouches; see **Reference** below.
+
 **Reference** — renders against expert retouches (FiveK, PPR10K, ...), scored
 with PSNR / SSIM / dE2000. Pair by filename stem; unmatched or undecodable
 files are skipped, not fatal.
