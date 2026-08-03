@@ -44,6 +44,9 @@ export interface PreviewOpts {
   bust?: string
   /** Render the untouched original — the "before" view. */
   original?: boolean
+  /** Keep every edit but ignore the crop, so the crop tool can show what is
+   *  being cropped *out*. */
+  nocrop?: boolean
 }
 
 /** Everything the export dialog can ask for. A superset of what the browser
@@ -193,7 +196,7 @@ export const ServerSource: PhotoSource = {
 
   thumbnail: async (id) => plain(api.thumbnailUrl(id)),
   preview: async (id, opts = {}) =>
-    plain(api.previewUrl(id, opts.size ?? 1600, opts.bust ?? '', opts.original ?? false)),
+    plain(api.previewUrl(id, opts.size ?? 1600, opts.bust ?? '', opts.original ?? false, opts.nocrop ?? false)),
   getFile: async () => null,
 
   async exportImages(ids, s, onProgress) {

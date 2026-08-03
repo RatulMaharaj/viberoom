@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check, FlipHorizontal2, FlipVertical2, X } from 'lucide-react'
-import { api } from '../api'
+import { getSource, type SourceUrl } from '../source'
 import { pushAction } from '../undo'
 
 interface CropRect {
@@ -43,9 +43,26 @@ export function CropTool({
   const wrap = useRef<HTMLDivElement>(null)
   const drag = useRef<{ mode: DragMode; fx: number; fy: number; start: CropRect } | null>(null)
   const rotateTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** The frame with every edit *except* the crop. A URL on the server, a
+   *  decode-and-render in the browser, so it has to be awaited either way. */
+  const [frame, setFrame] = useState<SourceUrl | null>(null)
 
   useEffect(() => {
-    api.getRecipe(imageId).then((r) => {
+    let stale = false
+    getSource()
+      .then((s) => s.preview(imageId, { size: 2048, bust, nocrop: true }))
+      .then((f) => (stale ? f.release() : setFrame(f)))
+      .catch(() => {})
+    return () => {
+      stale = true
+    }
+  }, [imageId, bust])
+
+  // Tied to the frame's lifetime, so one is never revoked while on screen.
+  useEffect(() => () => frame?.release(), [frame])
+
+  useEffect(() => {
+    getSource().then((s) => s.getRecipe(imageId)).then((r) => {
       setRecipe(r)
       const g = r.geometry ?? {}
       setCrop(g.crop ?? FULL)
@@ -60,7 +77,7 @@ export function CropTool({
     (geom: object) => {
       if (rotateTimer.current) clearTimeout(rotateTimer.current)
       rotateTimer.current = setTimeout(async () => {
-        await api.patchRecipe(imageId, { geometry: geom })
+        await (await getSource()).patchRecipe(imageId, { geometry: geom })
         setBust(String(Date.now()))
       }, 250)
     },
@@ -184,13 +201,13 @@ export function CropTool({
 
   const apply = async () => {
     const prev = recipe
-    const updated = await api.patchRecipe(imageId, {
+    const updated = await (await getSource()).patchRecipe(imageId, {
       geometry: { crop, rotate, flipH, flipV },
     })
     if (prev) {
       pushAction({
-        undo: () => api.putRecipe(imageId, prev),
-        redo: () => api.putRecipe(imageId, updated),
+        undo: () => getSource().then((s) => s.putRecipe(imageId, prev)),
+        redo: () => getSource().then((s) => s.putRecipe(imageId, updated)),
       })
     }
     onApplied()
@@ -199,7 +216,7 @@ export function CropTool({
 
   const cancel = async () => {
     // rotate/flip were patched live for preview; restore the original geometry
-    if (recipe) await api.putRecipe(imageId, recipe)
+    if (recipe) await (await getSource()).putRecipe(imageId, recipe)
     onApplied()
     onClose()
   }
@@ -265,7 +282,7 @@ export function CropTool({
       <div className="flex-1 min-h-0 flex items-center justify-center p-4">
         <div ref={wrap} className="relative inline-block max-h-full overflow-hidden">
           <img
-            src={api.previewUrl(imageId, 2048, bust, false, true)}
+            src={frame?.url ?? ''}
             alt=""
             draggable={false}
             className="max-h-[calc(100vh-14rem)] max-w-full object-contain select-none"

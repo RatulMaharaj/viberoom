@@ -348,7 +348,7 @@ async function previewUrl(id: string, opts: PreviewOpts): Promise<SourceUrl> {
   try {
     const file = await e.file.handle.getFile()
     const out = await limit(() =>
-      renderPreview(file, e.sidecar.recipe, opts.size ?? 1600, opts.original ?? false),
+      renderPreview(file, e.sidecar.recipe, opts.size ?? 1600, opts.original ?? false, opts.nocrop ?? false),
     )
     return blobUrl(out.blob, out.rendered)
   } catch (err) {

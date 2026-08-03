@@ -79,7 +79,16 @@ export async function renderPreview(
   recipe: unknown,
   size: number,
   original = false,
+  nocrop = false,
 ): Promise<RenderedPreview> {
+  // The crop tool needs every edit *except* the crop, so it can show what is
+  // being trimmed away. Resetting it here rather than asking callers to hand
+  // in a doctored recipe keeps the "what does this file look like" question
+  // in one place.
+  if (nocrop && recipe && typeof recipe === 'object') {
+    const r = recipe as Record<string, any>
+    recipe = { ...r, geometry: { ...r.geometry, crop: { left: 0, top: 0, right: 1, bottom: 1 } } }
+  }
   const drawable = !original && gpuEnabled() && gpuSupportsRecipe(recipe)
   if (drawable) {
     try {

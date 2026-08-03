@@ -94,16 +94,25 @@ export function Edit() {
   const refreshAll = useCallback(() => {
     setBust(String(Date.now()))
     setPanelVersion((v) => v + 1)
-    if (id) getSource().then((s) => s.getImage(id)).then(setImage)
+    if (id) getSource().then((s) => s.getImage(id)).then(setImage).catch(() => {})
   }, [id])
 
   const load = useCallback(() => {
-    if (id) getSource().then((s) => s.getImage(id)).then(setImage)
+    if (id) getSource().then((s) => s.getImage(id)).then(setImage).catch(() => {})
   }, [id])
 
   useEffect(() => {
-    getSource().then(setSource)
-  }, [])
+    getSource().then(async (s) => {
+      setSource(s)
+      // A reload lands here with no library: the folder handle survives in
+      // IndexedDB but its permission does not, and re-granting needs a click
+      // the browser will only accept from a real gesture. There is nowhere on
+      // this page to ask, so hand back to the catalog, which has the reconnect
+      // button — otherwise every lookup fails with "Unknown image" and the
+      // page just looks broken.
+      if (s.kind === 'local' && !(await s.getLibrary()).library) navigate('/')
+    })
+  }, [navigate])
 
   useEffect(() => {
     load()
@@ -113,7 +122,7 @@ export function Edit() {
   // filmstrip honors the same filters as the Organize grid
   useEffect(() => {
     saveLastImage(id ?? null)
-    getSource().then((s) => s.listImages(loadFilters())).then((r) => {
+    getSource().then((s) => s.listImages(loadFilters())).catch(() => ({ images: [] as ImageMeta[] })).then((r) => {
       setSiblings(r.images)
       if (!id && r.images.length) {
         const last = loadLastImage()
@@ -245,9 +254,9 @@ export function Edit() {
           )}
           <button
             className={`btn btn-sm ${cropMode ? 'btn-primary' : 'btn-ghost'}`}
-            title={local ? 'Crop needs the desktop app' : 'Crop & straighten (C)'}
+            title="Crop & straighten (C)"
             onClick={() => setCropMode((v) => !v)}
-            disabled={!id || local}
+            disabled={!id}
           >
             <Crop size={14} />
           </button>
