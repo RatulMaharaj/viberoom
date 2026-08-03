@@ -55,13 +55,16 @@ def scan(library: Library, db: CatalogDB, full: bool = False) -> dict:
     seen: set[str] = set()
     added = updated = 0
 
-    for dirpath, dirnames, filenames in os.walk(library.root):
+    walk_roots = library.all_roots()
+    for walk_root in walk_roots:
+      for dirpath, dirnames, filenames in os.walk(walk_root):
         dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "exports"]
         for name in filenames:
             p = Path(dirpath) / name
             if p.suffix.lower() not in IMAGE_EXTENSIONS or name.endswith(SIDECAR_SUFFIX):
                 continue
-            rel = str(p.relative_to(library.root))
+            # primary-root files are stored relative; extra roots absolute
+            rel = str(p.relative_to(library.root)) if walk_root == library.root else str(p)
             seen.add(rel)
             iid = image_id(rel)
             stat = p.stat()
@@ -73,6 +76,17 @@ def scan(library: Library, db: CatalogDB, full: bool = False) -> dict:
                 continue
 
             sc = load_sidecar(p)
+            if not sc_path.exists():
+                # no vibe sidecar yet: seed organize fields from a foreign
+                # .xmp (Lightroom, Capture One, ...) if one sits next to it
+                from viberoom.xmp import find_xmp, read_xmp
+
+                xmp_file = find_xmp(p)
+                if xmp_file is not None:
+                    xd = read_xmp(xmp_file)
+                    sc = sc.model_copy(update={
+                        k: xd[k] for k in ("rating", "label", "keywords") if k in xd
+                    })
             width, height, exif = read_metadata(p)
             summary = summarize_exif(exif)
             db.execute(

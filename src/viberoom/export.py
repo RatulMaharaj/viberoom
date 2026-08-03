@@ -54,11 +54,19 @@ def _write_png16(arr: np.ndarray, out_path: Path) -> None:
     out_path.write_bytes(payload)
 
 
-def _source_exif(src: Path) -> bytes:
-    """Basic EXIF carry-over when the source has it (best-effort for RAW)."""
+def _source_exif(src: Path, iptc: dict | None = None) -> bytes:
+    """Basic EXIF carry-over when the source has it (best-effort for RAW),
+    plus IPTC-style description fields mapped onto standard EXIF tags."""
     try:
         with Image.open(src) as orig:
-            return orig.getexif().tobytes()
+            exif = orig.getexif()
+    except Exception:
+        exif = Image.Exif()
+    for tag, key in ((270, "caption"), (315, "creator"), (33432, "copyright")):
+        if iptc and iptc.get(key):
+            exif[tag] = iptc[key]
+    try:
+        return exif.tobytes()
     except Exception:
         return b""
 
@@ -71,6 +79,7 @@ def export_image(
     quality: int = 90,
     bit_depth: Literal[8, 16] = 8,
     max_dimension: int | None = None,
+    iptc: dict | None = None,
 ) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -99,12 +108,15 @@ def export_image(
     if fmt == "jpeg":
         im.save(
             out_path, "JPEG",
-            quality=quality, icc_profile=_SRGB_ICC, exif=_source_exif(src), optimize=True,
+            quality=quality, icc_profile=_SRGB_ICC, exif=_source_exif(src, iptc), optimize=True,
         )
     elif fmt == "png":
         im.save(out_path, "PNG", icc_profile=_SRGB_ICC)
     else:  # tiff
-        im.save(out_path, "TIFF", icc_profile=_SRGB_ICC, compression="tiff_deflate")
+        im.save(
+            out_path, "TIFF",
+            icc_profile=_SRGB_ICC, compression="tiff_deflate", exif=_source_exif(src, iptc),
+        )
     return out_path
 
 

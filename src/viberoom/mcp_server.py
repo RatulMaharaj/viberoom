@@ -37,6 +37,41 @@ def set_library(path: str) -> dict:
 
 
 @mcp.tool()
+def library_roots(
+    action: Literal["list", "add", "remove"] = "list", path: str | None = None
+) -> dict:
+    """The catalog can span multiple folders (any drive). 'list' shows the
+    primary + extra roots; 'add'/'remove' manage extra roots (rescans)."""
+    if action == "list":
+        return _call("GET", "/library/roots").json()
+    if action == "add":
+        return _call("POST", "/library/roots", json={"path": path}).json()
+    return _call("DELETE", "/library/roots", params={"path": path}).json()
+
+
+@mcp.tool()
+def import_photos(
+    source: str,
+    move: bool = False,
+    rename: str = "{name}{ext}",
+    backup_dir: str | None = None,
+    dedupe: bool = True,
+    rating: int | None = None,
+    keywords: list[str] | None = None,
+    preset: str | None = None,
+) -> dict:
+    """Import images from a folder (memory card, downloads) into the library.
+    rename is a filename template (may contain '/' for subfolders) with
+    {name} {ext} {date} {time} {seq}; dedupe skips files whose content already
+    exists in the library; backup_dir copies originals there first; rating/
+    keywords/preset are applied to each imported image."""
+    body = {"source": source, "move": move, "rename": rename,
+            "backup_dir": backup_dir, "dedupe": dedupe, "rating": rating,
+            "keywords": keywords or [], "preset": preset}
+    return _call("POST", "/import", json=body).json()
+
+
+@mcp.tool()
 def list_images(
     rating_gte: int | None = None,
     flag: Literal["pick", "reject", "none"] | None = None,
@@ -49,7 +84,10 @@ def list_images(
     taken_after: str | None = None,
     taken_before: str | None = None,
     q: str | None = None,
+    folder: str | None = None,
     has_edits: bool | None = None,
+    collection: str | None = None,
+    stacks: Literal["collapse"] | None = None,
     sort: Literal["filename", "mtime", "rating", "taken_at"] = "filename",
     order: Literal["asc", "desc"] = "asc",
     limit: int = 200,
@@ -61,13 +99,15 @@ def list_images(
     label: color label or 'none' for unlabeled. keyword: exact keyword
     (case-insensitive). camera/lens/q: substring match (q searches filenames).
     taken_after/taken_before: 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS' against
-    EXIF capture time. Returns metadata including each image's id, which all
-    other tools take."""
+    EXIF capture time. folder: rel-path prefix. collection: restrict to a
+    collection. stacks='collapse': one frame per stack. Returns metadata
+    including each image's id, which all other tools take."""
     params = {k: v for k, v in {
         "rating_gte": rating_gte, "flag": flag, "label": label, "keyword": keyword,
         "camera": camera, "lens": lens, "iso_gte": iso_gte, "iso_lte": iso_lte,
         "taken_after": taken_after, "taken_before": taken_before, "q": q,
-        "has_edits": has_edits, "sort": sort, "order": order,
+        "folder": folder, "has_edits": has_edits, "collection": collection,
+        "stacks": stacks, "sort": sort, "order": order,
         "limit": limit, "offset": offset,
     }.items() if v is not None}
     return _call("GET", "/images", params=params).json()
@@ -122,6 +162,78 @@ def edit_keywords(
 def list_keywords() -> dict:
     """All distinct keywords in the library with usage counts."""
     return _call("GET", "/keywords").json()
+
+
+@mcp.tool()
+def set_iptc(
+    image_id: str,
+    title: str | None = None,
+    caption: str | None = None,
+    copyright: str | None = None,
+    creator: str | None = None,
+) -> dict:
+    """Set IPTC-style descriptive metadata (embedded in exports, written to
+    XMP). Omitted fields keep their current value."""
+    body = {k: v for k, v in {"title": title, "caption": caption,
+                               "copyright": copyright, "creator": creator}.items()
+            if v is not None}
+    return _call("PUT", f"/images/{image_id}/iptc", json=body).json()
+
+
+@mcp.tool()
+def write_xmp(image_id: str) -> dict:
+    """Write <image>.xmp with the current rating/label/keywords/IPTC so
+    Lightroom-family tools can read viberoom's organize state. (Foreign .xmp
+    files are read automatically at scan time for images without edits.)"""
+    return _call("POST", f"/images/{image_id}/xmp/write").json()
+
+
+@mcp.tool()
+def collections(
+    action: Literal["list", "save", "delete", "add_images", "remove_images"],
+    name: str | None = None,
+    type: Literal["static", "smart"] | None = None,
+    ids: list[str] | None = None,
+    query: dict | None = None,
+) -> dict:
+    """Manage collections; filter with list_images(collection=name).
+    'save' creates/replaces: static needs ids, smart needs a query using
+    list_images filter keys (e.g. {"rating_gte": 4, "flag": "pick"}).
+    'add_images'/'remove_images' edit a static collection's members (pass ids)."""
+    if action == "list":
+        return _call("GET", "/collections").json()
+    if action == "save":
+        return _call("PUT", f"/collections/{name}",
+                     json={"type": type, "ids": ids, "query": query}).json()
+    if action == "delete":
+        return _call("DELETE", f"/collections/{name}").json()
+    body = {"add": ids or []} if action == "add_images" else {"remove": ids or []}
+    return _call("POST", f"/collections/{name}/images", json=body).json()
+
+
+@mcp.tool()
+def auto_stack(gap_seconds: float = 2.0, raw_jpeg: bool = True) -> dict:
+    """Auto-stack burst sequences (capture times within gap_seconds) and
+    RAW+JPEG pairs. Then list_images(stacks='collapse') shows one frame per
+    stack. Replaces existing stacks."""
+    return _call("POST", "/stacks/auto",
+                 json={"gap_seconds": gap_seconds, "raw_jpeg": raw_jpeg}).json()
+
+
+@mcp.tool()
+def stack(image_ids: list[str] | None = None, unstack_id: str | None = None) -> dict:
+    """Manually stack images (first id becomes leader), or pass unstack_id
+    (a stack's leader id) to dissolve that stack."""
+    if unstack_id:
+        return _call("DELETE", f"/stacks/{unstack_id}").json()
+    return _call("POST", "/stacks", json={"image_ids": image_ids}).json()
+
+
+@mcp.tool()
+def find_duplicates(threshold: int = 5) -> dict:
+    """Groups of visually near-identical images (perceptual hash within
+    `threshold` bits, 0-16). Useful for proposing rejects."""
+    return _call("GET", "/duplicates", params={"threshold": threshold}).json()
 
 
 @mcp.tool()

@@ -46,6 +46,43 @@ class Library:
         d.mkdir(exist_ok=True)
         return d
 
+    # ---- extra roots: additional folders indexed into this catalog ----
+
+    @property
+    def _roots_file(self) -> Path:
+        return self.app_dir / "roots.json"
+
+    def extra_roots(self) -> list[Path]:
+        try:
+            return [Path(p) for p in json.loads(self._roots_file.read_text())]
+        except (OSError, ValueError):
+            return []
+
+    def all_roots(self) -> list[Path]:
+        return [self.root, *self.extra_roots()]
+
+    def add_root(self, path: Path) -> list[Path]:
+        p = path.expanduser().resolve()
+        if not p.is_dir():
+            raise NotADirectoryError(f"Not a directory: {p}")
+        if p == self.root or p in self.extra_roots():
+            return self.extra_roots()
+        roots = self.extra_roots() + [p]
+        self._roots_file.write_text(json.dumps([str(r) for r in roots]))
+        return roots
+
+    def remove_root(self, path: Path) -> list[Path]:
+        p = path.expanduser().resolve()
+        roots = [r for r in self.extra_roots() if r != p]
+        self._roots_file.write_text(json.dumps([str(r) for r in roots]))
+        return roots
+
+    def resolve(self, rel_path: str) -> Path:
+        """DB rel_path -> filesystem path. Primary-root files are stored
+        relative; extra-root files are stored absolute."""
+        p = Path(rel_path)
+        return p if p.is_absolute() else self.root / p
+
 
 def save_last_library(root: Path) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)

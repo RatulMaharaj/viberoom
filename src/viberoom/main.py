@@ -72,6 +72,83 @@ def rescan(full: bool = False) -> dict:
     return scan(lib, state.db(), full=full)
 
 
+class RootIn(BaseModel):
+    path: str
+
+
+@api.get("/library/roots")
+def list_roots() -> dict:
+    """All folders in the catalog: the primary root plus extra roots."""
+    lib = state.require_library()
+    return {"primary": str(lib.root), "extra": [str(r) for r in lib.extra_roots()]}
+
+
+@api.post("/library/roots")
+def add_root(body: RootIn) -> dict:
+    """Add another folder (any drive) to this library's catalog and scan it."""
+    lib = state.require_library()
+    try:
+        lib.add_root(Path(body.path))
+    except NotADirectoryError as e:
+        raise HTTPException(400, str(e))
+    result = scan(lib, state.db())
+    return {"primary": str(lib.root), "extra": [str(r) for r in lib.extra_roots()], **result}
+
+
+@api.delete("/library/roots")
+def remove_root(path: str) -> dict:
+    """Remove an extra folder from the catalog (its rows prune on rescan)."""
+    lib = state.require_library()
+    lib.remove_root(Path(path))
+    result = scan(lib, state.db())
+    return {"primary": str(lib.root), "extra": [str(r) for r in lib.extra_roots()], **result}
+
+
+# ---------- import ----------
+
+class ImportIn(BaseModel):
+    source: str
+    move: bool = False
+    rename: str = Field(
+        default="{name}{ext}",
+        description="Filename template; may contain '/' for subfolders. "
+        "Placeholders: {name} {ext} {date} {time} {seq}.",
+    )
+    backup_dir: str | None = None
+    dedupe: bool = True
+    rating: int | None = Field(default=None, ge=0, le=5)
+    keywords: list[str] = Field(default_factory=list)
+    preset: str | None = Field(default=None, description="Develop preset applied on import.")
+
+
+@api.post("/import")
+def import_photos(body: ImportIn) -> dict:
+    """Copy/move images from a source folder (memory card, downloads) into
+    the library with rename templates, content-hash dedupe, optional backup,
+    and rating/keywords/preset applied on import."""
+    from viberoom.ingest import import_files
+
+    lib = state.require_library()
+    recipe_patch = None
+    if body.preset:
+        try:
+            recipe_patch = preset_store.load_preset(body.preset)
+        except KeyError:
+            raise HTTPException(404, f"no preset named {body.preset!r}")
+    try:
+        result = import_files(
+            Path(body.source).expanduser(), lib, state.db(),
+            move=body.move, rename=body.rename,
+            backup_dir=Path(body.backup_dir).expanduser() if body.backup_dir else None,
+            dedupe=body.dedupe, rating=body.rating,
+            keywords=body.keywords, recipe_patch=recipe_patch,
+        )
+    except NotADirectoryError as e:
+        raise HTTPException(400, str(e))
+    scan_result = scan(lib, state.db())
+    return {**result, "library_total": scan_result["total"]}
+
+
 # ---------- session: what the user is currently looking at ----------
 
 _current_image: str | None = None
@@ -116,14 +193,14 @@ async def events():
     lib = state.require_library()
 
     async def gen():
-        async for changes in awatch(lib.root, recursive=True):
+        async for changes in awatch(*lib.all_roots(), recursive=True):
             ids = set()
             for _, p in changes:
                 if p.endswith(SIDECAR_SUFFIX):
                     try:
                         rel = str(Path(p).relative_to(lib.root))[: -len(SIDECAR_SUFFIX)]
                     except ValueError:
-                        continue
+                        rel = p[: -len(SIDECAR_SUFFIX)]  # extra roots: absolute
                     iid = make_id(rel)
                     _sync_sidecar_to_db(iid)
                     ids.add(iid)
@@ -141,7 +218,7 @@ def _sync_sidecar_to_db(image_id: str) -> None:
     rows = state.db().query("SELECT rel_path FROM images WHERE id=?", (image_id,))
     if not rows:
         return
-    path = lib.root / rows[0]["rel_path"]
+    path = lib.resolve(rows[0]["rel_path"])
     sc = load_sidecar(path)
     sc_path = path.with_name(path.name + ".vibe.json")
     state.db().execute(
@@ -196,7 +273,68 @@ def _image_path(image_id: str) -> Path:
     rows = state.db().query("SELECT rel_path FROM images WHERE id=?", (image_id,))
     if not rows:
         raise HTTPException(404, f"unknown image id {image_id}")
-    return lib.root / rows[0]["rel_path"]
+    return lib.resolve(rows[0]["rel_path"])
+
+
+def _build_where(f: dict) -> tuple[list[str], list]:
+    """Translate a filter dict (the /images query params, also used by smart
+    collections) into SQL where fragments + params."""
+    where, params = [], []
+    if f.get("rating_gte") is not None:
+        where.append("rating >= ?")
+        params.append(f["rating_gte"])
+    flag = f.get("flag")
+    if flag == "none":
+        where.append("flag IS NULL")
+    elif flag:
+        where.append("flag = ?")
+        params.append(flag)
+    label = f.get("label")
+    if label == "none":
+        where.append("label IS NULL")
+    elif label:
+        where.append("label = ?")
+        params.append(label)
+    if f.get("keyword"):
+        # keywords_json is a JSON array of strings; match one, case-insensitive
+        where.append(
+            "EXISTS (SELECT 1 FROM json_each(images.keywords_json) WHERE lower(json_each.value) = ?)"
+        )
+        params.append(f["keyword"].lower())
+    if f.get("camera"):
+        where.append("camera LIKE ?")
+        params.append(f"%{f['camera']}%")
+    if f.get("lens"):
+        where.append("lens LIKE ?")
+        params.append(f"%{f['lens']}%")
+    if f.get("iso_gte") is not None:
+        where.append("iso >= ?")
+        params.append(f["iso_gte"])
+    if f.get("iso_lte") is not None:
+        where.append("iso <= ?")
+        params.append(f["iso_lte"])
+    if f.get("taken_after"):
+        where.append("taken_at >= ?")
+        params.append(f["taken_after"])
+    if f.get("taken_before"):
+        # a bare date means "through the end of that day"
+        tb = f["taken_before"]
+        where.append("taken_at <= ?")
+        params.append(tb + (" 23:59:59" if len(tb) == 10 else ""))
+    if f.get("q"):
+        where.append("filename LIKE ?")
+        params.append(f"%{f['q']}%")
+    if f.get("folder"):
+        where.append("rel_path LIKE ?")
+        params.append(f"{f['folder']}%")
+    if f.get("ext"):
+        ext = f["ext"]
+        where.append("ext = ?")
+        params.append(ext.lower() if ext.startswith(".") else f".{ext.lower()}")
+    if f.get("has_edits") is not None:
+        where.append("has_edits = ?")
+        params.append(int(f["has_edits"]))
+    return where, params
 
 
 @api.get("/images")
@@ -212,8 +350,11 @@ def list_images(
     taken_after: str | None = None,
     taken_before: str | None = None,
     q: str | None = None,
+    folder: str | None = None,
     ext: str | None = None,
     has_edits: bool | None = None,
+    collection: str | None = None,
+    stacks: Literal["collapse"] | None = None,
     sort: Literal["filename", "mtime", "rating", "taken_at"] = "filename",
     order: Literal["asc", "desc"] = "asc",
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
@@ -221,56 +362,34 @@ def list_images(
 ) -> dict:
     """List/filter images. Substring filters: camera, lens, q (filename).
     keyword matches exactly, case-insensitive. taken_after/taken_before
-    compare against EXIF capture time as 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'."""
-    state.require_library()
-    where, params = [], []
-    if rating_gte is not None:
-        where.append("rating >= ?")
-        params.append(rating_gte)
-    if flag == "none":
-        where.append("flag IS NULL")
-    elif flag:
-        where.append("flag = ?")
-        params.append(flag)
-    if label == "none":
-        where.append("label IS NULL")
-    elif label:
-        where.append("label = ?")
-        params.append(label)
-    if keyword:
-        # keywords_json is a JSON array of strings; match one, case-insensitive
-        where.append(
-            "EXISTS (SELECT 1 FROM json_each(images.keywords_json) WHERE lower(json_each.value) = ?)"
-        )
-        params.append(keyword.lower())
-    if camera:
-        where.append("camera LIKE ?")
-        params.append(f"%{camera}%")
-    if lens:
-        where.append("lens LIKE ?")
-        params.append(f"%{lens}%")
-    if iso_gte is not None:
-        where.append("iso >= ?")
-        params.append(iso_gte)
-    if iso_lte is not None:
-        where.append("iso <= ?")
-        params.append(iso_lte)
-    if taken_after:
-        where.append("taken_at >= ?")
-        params.append(taken_after)
-    if taken_before:
-        # a bare date means "through the end of that day"
-        where.append("taken_at <= ?")
-        params.append(taken_before + (" 23:59:59" if len(taken_before) == 10 else ""))
-    if q:
-        where.append("filename LIKE ?")
-        params.append(f"%{q}%")
-    if ext:
-        where.append("ext = ?")
-        params.append(ext.lower() if ext.startswith(".") else f".{ext.lower()}")
-    if has_edits is not None:
-        where.append("has_edits = ?")
-        params.append(int(has_edits))
+    compare against EXIF capture time as 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'.
+    collection restricts to a static or smart collection; stacks=collapse
+    shows only stack leaders and unstacked images."""
+    from viberoom.catalog import collections_store
+
+    lib = state.require_library()
+    where, params = _build_where({
+        "rating_gte": rating_gte, "flag": flag, "label": label, "keyword": keyword,
+        "camera": camera, "lens": lens, "iso_gte": iso_gte, "iso_lte": iso_lte,
+        "taken_after": taken_after, "taken_before": taken_before, "q": q,
+        "folder": folder, "ext": ext, "has_edits": has_edits,
+    })
+    if collection is not None:
+        try:
+            col = collections_store.get_collection(lib, collection)
+        except KeyError:
+            raise HTTPException(404, f"no collection named {collection!r}")
+        if col["type"] == "static":
+            if not col["ids"]:
+                return {"total": 0, "images": []}
+            where.append(f"id IN ({','.join('?' * len(col['ids']))})")
+            params.extend(col["ids"])
+        else:
+            smart_where, smart_params = _build_where(col["query"])
+            where += smart_where
+            params += smart_params
+    if stacks == "collapse":
+        where.append("(stack_id IS NULL OR stack_id = id)")
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     total = state.db().query(f"SELECT COUNT(*) AS n FROM images {clause}", tuple(params))[0]["n"]
     rows = state.db().query(
@@ -278,6 +397,122 @@ def list_images(
         tuple(params) + (limit, offset),
     )
     return {"total": total, "images": [_row_to_dict(r) for r in rows]}
+
+
+# ---------- collections ----------
+
+class CollectionIn(BaseModel):
+    type: Literal["static", "smart"]
+    ids: list[str] | None = None
+    query: dict | None = None
+
+
+class CollectionImagesIn(BaseModel):
+    add: list[str] = Field(default_factory=list)
+    remove: list[str] = Field(default_factory=list)
+
+
+@api.get("/collections")
+def list_collections_endpoint() -> dict:
+    from viberoom.catalog import collections_store
+
+    lib = state.require_library()
+    return {"collections": collections_store.list_collections(lib)}
+
+
+@api.put("/collections/{name}")
+def save_collection(name: str, body: CollectionIn) -> dict:
+    """Create/replace a collection. Static: {type: 'static', ids: [...]}.
+    Smart: {type: 'smart', query: {rating_gte: 4, flag: 'pick', ...}} — the
+    query uses the same filters as GET /images and is evaluated live."""
+    from viberoom.catalog import collections_store
+
+    lib = state.require_library()
+    spec: dict = {"type": body.type}
+    if body.ids is not None:
+        spec["ids"] = body.ids
+    if body.query is not None:
+        spec["query"] = body.query
+    try:
+        return collections_store.save_collection(lib, name, spec)
+    except collections_store.CollectionError as e:
+        raise HTTPException(422, str(e))
+
+
+@api.delete("/collections/{name}")
+def delete_collection(name: str) -> dict:
+    from viberoom.catalog import collections_store
+
+    lib = state.require_library()
+    try:
+        collections_store.delete_collection(lib, name)
+    except KeyError:
+        raise HTTPException(404, f"no collection named {name!r}")
+    return {"deleted": name}
+
+
+@api.post("/collections/{name}/images")
+def edit_collection_images(name: str, body: CollectionImagesIn) -> dict:
+    """Add/remove images in a static collection."""
+    from viberoom.catalog import collections_store
+
+    lib = state.require_library()
+    try:
+        return collections_store.edit_static(lib, name, body.add, body.remove)
+    except KeyError:
+        raise HTTPException(404, f"no collection named {name!r}")
+    except collections_store.CollectionError as e:
+        raise HTTPException(422, str(e))
+
+
+# ---------- stacks & duplicates ----------
+
+class AutoStackIn(BaseModel):
+    gap_seconds: float = Field(default=2.0, gt=0, le=60)
+    raw_jpeg: bool = True
+
+
+class StackIn(BaseModel):
+    image_ids: list[str] = Field(min_length=2, max_length=1000)
+
+
+@api.post("/stacks/auto")
+def auto_stack_endpoint(body: AutoStackIn | None = None) -> dict:
+    """Auto-stack bursts (capture times within gap_seconds) and RAW+JPEG
+    pairs. Replaces all existing stacks."""
+    from viberoom.catalog.stacks import auto_stack
+
+    state.require_library()
+    b = body or AutoStackIn()
+    return auto_stack(state.db(), gap_seconds=b.gap_seconds, raw_jpeg=b.raw_jpeg)
+
+
+@api.post("/stacks")
+def create_stack(body: StackIn) -> dict:
+    from viberoom.catalog.stacks import set_stack
+
+    state.require_library()
+    for iid in body.image_ids:
+        _image_path(iid)  # 404 on unknown ids
+    return set_stack(state.db(), body.image_ids)
+
+
+@api.delete("/stacks/{stack_id}")
+def delete_stack(stack_id: str) -> dict:
+    from viberoom.catalog.stacks import unstack
+
+    state.require_library()
+    return {"unstacked": unstack(state.db(), stack_id)}
+
+
+@api.get("/duplicates")
+def list_duplicates(threshold: Annotated[int, Query(ge=0, le=16)] = 5) -> dict:
+    """Groups of visually near-identical images (perceptual dHash within
+    `threshold` bits). Useful for proposing rejects."""
+    from viberoom.catalog.stacks import find_duplicates
+
+    lib = state.require_library()
+    return find_duplicates(state.db(), lib, threshold=threshold)
 
 
 @api.get("/exts")
@@ -378,6 +613,60 @@ def set_keywords(image_id: str, body: KeywordsIn) -> dict:
 def patch_keywords(image_id: str, body: KeywordsPatchIn) -> dict:
     current = load_sidecar(_image_path(image_id)).keywords
     return _update_sidecar(image_id, keywords=_merge_keywords(current, body.add, body.remove))
+
+
+class IPTCIn(BaseModel):
+    title: str | None = None
+    caption: str | None = None
+    copyright: str | None = None
+    creator: str | None = None
+
+
+@api.get("/images/{image_id}/iptc")
+def get_iptc(image_id: str) -> dict:
+    return load_sidecar(_image_path(image_id)).iptc.model_dump(mode="json")
+
+
+@api.put("/images/{image_id}/iptc")
+def set_iptc(image_id: str, body: IPTCIn) -> dict:
+    """Set IPTC-style descriptive metadata. Fields set to null are cleared;
+    omitted fields keep their value. Embedded in exports and written to XMP."""
+    from viberoom.recipe.sidecar import IPTC
+
+    path = _image_path(image_id)
+    current = load_sidecar(path).iptc.model_dump()
+    current.update(body.model_dump(exclude_unset=True))
+    _update_sidecar(image_id, iptc=IPTC(**current))
+    return current
+
+
+@api.get("/images/{image_id}/xmp")
+def get_xmp(image_id: str) -> dict:
+    """Parse a foreign .xmp sidecar next to the image (if any)."""
+    from viberoom.xmp import find_xmp, read_xmp
+
+    path = _image_path(image_id)
+    xmp_file = find_xmp(path)
+    if xmp_file is None:
+        return {"path": None, "data": {}}
+    return {"path": str(xmp_file), "data": read_xmp(xmp_file)}
+
+
+@api.post("/images/{image_id}/xmp/write")
+def write_xmp_endpoint(image_id: str) -> dict:
+    """Write <image>.xmp with the current rating/label/keywords/IPTC so
+    Lightroom-family tools can read viberoom's organize state."""
+    from viberoom.xmp import write_xmp
+
+    path = _image_path(image_id)
+    sc = load_sidecar(path)
+    out = write_xmp(
+        path.with_name(path.name + ".xmp"),
+        rating=sc.rating, label=sc.label, keywords=sc.keywords,
+        title=sc.iptc.title, caption=sc.iptc.caption,
+        copyright=sc.iptc.copyright, creator=sc.iptc.creator,
+    )
+    return {"path": str(out)}
 
 
 @api.get("/keywords")
@@ -645,7 +934,8 @@ def _export_one(image_id: str, body: ExportIn) -> dict:
     src = _image_path(image_id)
     if body.bit_depth == 16 and body.format != "png":
         raise HTTPException(422, "bit_depth 16 is only supported for png")
-    recipe = _recipe_for_variant(load_sidecar(src), body.variant)
+    sc = load_sidecar(src)
+    recipe = _recipe_for_variant(sc, body.variant)
     suffix = f"-{body.variant}" if body.variant else ""
     out = (
         Path(body.path).expanduser()
@@ -655,6 +945,7 @@ def _export_one(image_id: str, body: ExportIn) -> dict:
     result = export_file(
         src, recipe, out, body.format,
         quality=body.quality, bit_depth=body.bit_depth, max_dimension=body.max_dimension,
+        iptc=sc.iptc.model_dump(),
     )
     return {"id": image_id, "path": str(result), "format": body.format}
 

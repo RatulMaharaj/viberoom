@@ -31,6 +31,15 @@ class HistoryEntry(BaseModel):
     recipe: Recipe
 
 
+class IPTC(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    caption: str | None = None
+    copyright: str | None = None
+    creator: str | None = None
+
+
 class Sidecar(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -39,6 +48,7 @@ class Sidecar(BaseModel):
     flag: Flag = None
     label: Label = None
     keywords: list[str] = Field(default_factory=list)
+    iptc: IPTC = Field(default_factory=IPTC)
     recipe: Recipe = Field(default_factory=Recipe)
     # named point-in-time saves of the recipe (restorable)
     snapshots: dict[str, Recipe] = Field(default_factory=dict)
