@@ -20,8 +20,16 @@ export function installWebMcp(): number {
   // second call is harmless — but the guard keeps the count honest.
   if (installed) return installed
 
-  ctx.provideContext({ tools })
-  installed = tools.length
+  // A draft API in one browser behind a flag: it may reject a tool shape it
+  // does not recognise, and that must stay this function's problem. Leaving it
+  // to throw took the entire app down the first time the flag was switched on.
+  try {
+    ctx.provideContext({ tools })
+    installed = tools.length
+  } catch (err) {
+    console.warn('WebMCP registration rejected our tools', err)
+    return 0
+  }
   // The bundle has no stable module handle, so hang the introspection helpers
   // somewhere a person can reach them from devtools.
   ;(window as unknown as Record<string, unknown>).viberoomWebmcp = {
