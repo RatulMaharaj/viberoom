@@ -77,7 +77,14 @@ export function Library() {
 
   // Live refresh when agents edit sidecars on disk. Server-only: the event
   // stream is an endpoint, and locally nothing else is writing the folder.
-  useEffect(() => (local ? undefined : onSidecarChange(() => refresh())), [local, refresh])
+  // `source` and not `local`: local starts false while the probe is in flight,
+  // so keying on it alone opened the stream before we knew there was nothing
+  // to stream from — and a static host answers /events with HTML, which
+  // EventSource rejects loudly.
+  useEffect(
+    () => (!source || local ? undefined : onSidecarChange(() => refresh())),
+    [source, local, refresh],
+  )
 
   // Locally, EXIF lands after the grid has already painted — see the backfill
   // in local/index.ts. Re-listing is how it reaches the cards.
@@ -319,17 +326,18 @@ export function Library() {
           {multi.length ? <Square size={14} /> : <CheckSquare size={14} />}
           {multi.length ? `${multi.length} selected` : 'Select all'}
         </button>
-        {/* Export and Organize are server-side compute and a server-side
-            catalog respectively; neither has a browser implementation, so they
-            say so rather than failing on click. */}
+        {/* Organize needs the server's catalog and says so rather than failing
+            on click. Export no longer does: the browser renders and writes the
+            files itself, and the options it cannot do are disabled inside the
+            dialog. */}
         <button
           className="btn btn-sm btn-primary"
           title={
             local
-              ? 'Export needs the desktop app'
+              ? 'Export the selection — rendered here, written to a folder you pick'
               : 'Export the selection (or the current image)'
           }
-          disabled={local || (!multi.length && !selected)}
+          disabled={!multi.length && !selected}
           onClick={() => setExportOpen(true)}
         >
           <Download size={14} /> Export…

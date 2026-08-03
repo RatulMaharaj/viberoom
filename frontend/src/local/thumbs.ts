@@ -62,9 +62,24 @@ export async function bitmapToUrl(bitmap: ImageBitmap, quality = 0.85): Promise<
 /** A neutral tile for anything we cannot decode yet, so an undecodable RAW
  *  reads as "not ready" rather than as a broken image. */
 export function placeholderUrl(label: string): string {
+  // A shimmer, not an icon and a filename. Decoding a RAW takes long enough to
+  // notice, and a tile that looks like a *result* — even a grey one with text
+  // on it — reads as "this is what your photo is". A moving skeleton reads as
+  // "still working", which is what is actually true. The label stays as a
+  // small caption for the case where the wait ends in a failure.
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="213">
-<rect width="100%" height="100%" fill="#1d232a"/>
-<text x="50%" y="50%" fill="#7a8590" font-family="monospace" font-size="20"
- text-anchor="middle" dominant-baseline="middle">${label}</text></svg>`
+  <defs>
+    <linearGradient id="s" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#20262e"/>
+      <stop offset="50%" stop-color="#2b333d"/>
+      <stop offset="100%" stop-color="#20262e"/>
+      <animateTransform attributeName="gradientTransform" type="translate"
+        from="-1 0" to="1 0" dur="1.4s" repeatCount="indefinite"/>
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#s)"/>
+  <text x="50%" y="88%" fill="#5c6672" font-family="ui-monospace, monospace"
+    font-size="11" letter-spacing="1.5" text-anchor="middle">${label}</text>
+</svg>`
   return URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
 }

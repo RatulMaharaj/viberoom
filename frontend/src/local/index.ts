@@ -7,8 +7,29 @@
  *  in the browser would buy a cache we can rebuild in a directory walk.
  */
 
-import type { Filters, Flag, ImageMeta, PhotoSource, PreviewOpts, SourceUrl } from '../source'
+import type {
+  ExportProgress,
+  ExportReport,
+  ExportResult,
+  ExportSettings,
+  Filters,
+  Flag,
+  ImageMeta,
+  PhotoSource,
+  PreviewOpts,
+  SourceUrl,
+} from '../source'
 import { readMetadata, thumbnailBitmap, type ExifSummary } from './decode'
+import {
+  chooseExportDestination,
+  exportDestination,
+  exportFile,
+  extensionFor,
+  releaseExportRenderer,
+  renderFilename,
+  requireExportDestination,
+  writeExport,
+} from './export'
 import { pickLibrary, restoreLibrary } from './handles'
 import { renderPreview } from './preview'
 import { defaultRecipe, hasEdits, mergeRecipe } from './recipe'
@@ -86,6 +107,18 @@ function blobUrl(blob: Blob, rendered: SourceUrl['rendered']): SourceUrl {
 function requireRoot(): FileSystemDirectoryHandle {
   if (!root) throw new Error('No library open')
   return root
+}
+
+/** Restore the folder and walk it, if that has not happened yet.
+ *
+ *  Only `getLibrary()` used to do this, which was fine while the grid was
+ *  always the first thing to load. Opening /edit/<id> directly — or simply
+ *  reloading while on it — asks for one image without ever listing the folder,
+ *  and every id-based method then threw "Unknown image" against an empty
+ *  index. Cheap to call repeatedly: both steps are already idempotent. */
+async function ready(): Promise<void> {
+  root ??= await restoreLibrary()
+  if (root && index.size === 0) await buildIndex(root)
 }
 
 function entry(id: string): Entry {
@@ -291,6 +324,7 @@ function placeholder(ext: string): SourceUrl {
 }
 
 async function thumbnailUrl(id: string): Promise<SourceUrl> {
+  await ready()
   const e = entry(id)
   const hit = thumbBlobs.get(id)
   if (hit) return blobUrl(hit, 'original')
@@ -309,6 +343,7 @@ async function thumbnailUrl(id: string): Promise<SourceUrl> {
 /** The develop preview, rendered here rather than fetched. See
  *  `local/preview.ts` for what happens to a recipe the shader cannot draw. */
 async function previewUrl(id: string, opts: PreviewOpts): Promise<SourceUrl> {
+  await ready()
   const e = entry(id)
   try {
     const file = await e.file.handle.getFile()
@@ -316,9 +351,126 @@ async function previewUrl(id: string, opts: PreviewOpts): Promise<SourceUrl> {
       renderPreview(file, e.sidecar.recipe, opts.size ?? 1600, opts.original ?? false),
     )
     return blobUrl(out.blob, out.rendered)
-  } catch {
+  } catch (err) {
+    // Swallowing this made a failed render indistinguishable from an
+    // unsupported format: both showed the same grey tile with the extension
+    // on it, and the reason went nowhere. The tile is still the right thing to
+    // show; the reason belongs in the console.
+    console.warn(`preview failed for ${e.file.filename}`, err)
     return placeholder(e.file.ext)
   }
+}
+
+// ------------------------------------------------------------------ export
+
+/** Settings the browser has no honest implementation of. The dialog disables
+ *  every one of these in local mode; this is the backstop, and it refuses the
+ *  whole export rather than quietly dropping the option — a JPEG that was
+ *  meant to carry a watermark and does not is a file the user will not notice
+ *  is wrong until it is published. */
+function unsupportedSettings(s: ExportSettings): string | null {
+  const bad: string[] = []
+  if (s.format === 'tiff') bad.push('TIFF')
+  if (s.bit_depth === 16) bad.push('16-bit PNG')
+  if (s.color_space !== 'srgb') bad.push(`the ${s.color_space} colour space`)
+  if (s.output_sharpen) bad.push('output sharpening')
+  if (s.watermark && (s.watermark.text || s.watermark.image)) bad.push('watermarks')
+  if (s.variant) bad.push('variants')
+  return bad.length
+    ? `Exporting in the browser cannot do ${bad.join(', ')} — that needs the desktop app.`
+    : null
+}
+
+/** Let React paint between photos. A full-res render and a JPEG encode both
+ *  block the main thread for a second or more, so without this the progress
+ *  bar would jump from 0 to done. */
+const breathe = () => new Promise<void>((r) => setTimeout(r, 0))
+
+/** The name shown in the filename template's `{name}`: the stem, as
+ *  `Path.stem` gives it. */
+function stemOf(e: Entry): string {
+  const { filename, ext } = e.file
+  return ext && filename.toLowerCase().endsWith(ext.toLowerCase())
+    ? filename.slice(0, filename.length - ext.length)
+    : filename
+}
+
+async function exportImages(
+  ids: string[],
+  s: ExportSettings,
+  onProgress?: (p: ExportProgress) => void,
+): Promise<ExportReport> {
+  const refusal = unsupportedSettings(s)
+  if (refusal) throw new Error(refusal)
+  const format = s.format === 'png' ? 'png' : 'jpeg'
+  const ext = extensionFor(format)
+
+  // First await, deliberately: `showDirectoryPicker` needs the click's
+  // transient activation, and a decode in front of it would spend it.
+  const dir = await requireExportDestination()
+
+  // Exporting straight off a reloaded /edit/<id> may be the first thing that
+  // touches the index at all.
+  await ready()
+
+  // `{date}` is the only token that needs EXIF, and the backfill may still be
+  // running. Waiting for it here beats writing a folder of `undated/`.
+  if (s.filename?.includes('{date}')) await metadataReady()
+
+  const results: ExportResult[] = []
+  try {
+    for (const [i, id] of ids.entries()) {
+      const e = index.get(id)
+      const label = e?.file.filename ?? id
+      const progress = (stage: ExportProgress['stage']) =>
+        onProgress?.({ index: i + 1, total: ids.length, filename: label, stage })
+      progress('render')
+      await breathe()
+      try {
+        if (!e) throw new Error('not in this library any more')
+        const name = s.filename
+          ? renderFilename(s.filename, {
+              name: stemOf(e),
+              seq: i + 1,
+              rating: e.sidecar.rating,
+              date: e.summary?.taken_at?.slice(0, 10) ?? null,
+              ext,
+            })
+          : stemOf(e) + ext
+        const out = await exportFile(await e.file.handle.getFile(), e.sidecar.recipe, {
+          format,
+          quality: s.quality,
+          maxDimension: s.max_dimension,
+        })
+        progress('write')
+        const path = await writeExport(dir, name, out.blob)
+        results.push({
+          id,
+          filename: label,
+          ok: true,
+          path,
+          note: out.capped
+            ? `rendered at ${out.renderWidth}x${out.renderHeight}, not the file's ` +
+              `${out.sourceWidth}x${out.sourceHeight} — the browser caps export size`
+            : undefined,
+        })
+      } catch (err) {
+        // One photo's refusal must not cost the other thirty-nine.
+        results.push({
+          id,
+          filename: label,
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+      progress('done')
+    }
+  } finally {
+    // Hand back the full-resolution render targets whatever happened; they are
+    // hundreds of megabytes and nothing else in the app wants them.
+    releaseExportRenderer()
+  }
+  return { written: results.filter((r) => r.ok).length, results, destination: dir.name }
 }
 
 export const LocalSource: PhotoSource = {
@@ -327,8 +479,7 @@ export const LocalSource: PhotoSource = {
   async getLibrary() {
     // Restoring never prompts; a stored-but-unpermitted handle reads as "no
     // library" so the UI offers a reconnect click instead of failing reads.
-    root ??= await restoreLibrary()
-    if (root && index.size === 0) await buildIndex(root)
+    await ready()
     return { library: root?.name ?? null }
   },
 
@@ -365,26 +516,31 @@ export const LocalSource: PhotoSource = {
   },
 
   async getImage(id) {
+    await ready()
     return entry(id).meta
   },
 
   async setRating(id, rating) {
+    await ready()
     await updateSidecar(id, (s) => {
       s.rating = rating
     })
   },
 
   async setFlag(id, flag: Flag) {
+    await ready()
     await updateSidecar(id, (s) => {
       s.flag = flag
     })
   },
 
   async getRecipe(id) {
+    await ready()
     return entry(id).sidecar.recipe
   },
 
   async putRecipe(id, recipe) {
+    await ready()
     const s = await updateSidecar(id, (sc) => {
       sc.history.push({ at: new Date().toISOString(), recipe: sc.recipe })
       // HISTORY_CAP in sidecar.py; keeping the cap here stops a long editing
@@ -396,6 +552,7 @@ export const LocalSource: PhotoSource = {
   },
 
   async patchRecipe(id, patch) {
+    await ready()
     const s = await updateSidecar(id, (sc) => {
       sc.recipe = mergeRecipe(sc.recipe, patch as Record<string, any>)
     })
@@ -403,6 +560,7 @@ export const LocalSource: PhotoSource = {
   },
 
   async resetRecipe(id) {
+    await ready()
     const s = await updateSidecar(id, (sc) => {
       sc.recipe = defaultRecipe()
     })
@@ -413,10 +571,29 @@ export const LocalSource: PhotoSource = {
   preview: (id, opts: PreviewOpts = {}) => previewUrl(id, opts),
 
   async getFile(id) {
+    await ready()
     return entry(id).file.handle.getFile()
   },
+
+  exportImages,
+
+  async chooseExportDestination() {
+    try {
+      return (await chooseExportDestination()).name
+    } catch (e) {
+      // Cancelling the picker is a decision, not a failure.
+      if (e instanceof DOMException && e.name === 'AbortError') return null
+      throw e
+    }
+  },
+
+  exportDestinationName: () => exportDestination()?.name ?? null,
 }
 
 export { fileSystemAccessSupported, forgetLibrary, libraryNeedsPermission, regrantLibrary } from './handles'
 export { registerRawDecoder } from './thumbs'
+export {
+  EXPORT_PIXEL_CAP, cappedSize, exportRefusal, fitWithin, releaseExportRenderer, renderExport,
+  renderFilename,
+} from './export'
 export { metadataReady }
