@@ -145,8 +145,17 @@ export function getSource(): Promise<PhotoSource> {
 async function probeServer(): Promise<boolean> {
   try {
     const res = await fetch('/api/v1/library', { method: 'GET' })
-    return res.ok
+    if (!res.ok) return false
+    // A 200 is not enough. Most static hosts answer an unknown path with the
+    // SPA shell rather than a 404 — so the API probe comes back as a cheerful
+    // 200 of HTML, the app concludes it has a backend, and then every call
+    // fails. Insist on the JSON this endpoint actually returns.
+    if (!(res.headers.get('content-type') ?? '').includes('application/json')) return false
+    const body = await res.json()
+    return typeof body === 'object' && body !== null && 'library' in body
   } catch {
+    // Network failure, or HTML that would not parse as JSON. Either way there
+    // is nothing to talk to.
     return false
   }
 }
