@@ -47,6 +47,34 @@ DARKTABLE_CLI_CANDIDATES = (
 
 # ---------- renderers ----------
 
+class UnsupportedFormat(Exception):
+    """The external tool cannot decode this file at all.
+
+    Distinct from a failure: there is nothing to fix on our side, and the
+    file should be reported as out of that tool's scope rather than as an
+    error on every run.
+    """
+
+
+#: Signatures in a tool's output that mean "this format is not supported",
+#: as opposed to a transient or invocation problem.
+_UNSUPPORTED_SIGNATURES = (
+    "no decoder found",
+    "unsupported file format",
+    "unsupported predictor",
+    "not raw file",
+)
+
+
+def _classify_failure(message: str) -> str | None:
+    """Return a reason if `message` indicates an unsupported format."""
+    low = message.lower()
+    for sig in _UNSUPPORTED_SIGNATURES:
+        if sig in low:
+            return sig
+    return None
+
+
 class Renderer:
     """Renders a RAW file to uint8 sRGB. Subclasses wrap external tools."""
 
@@ -181,6 +209,17 @@ class DarktableRenderer(Renderer):
             ]
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
             if not out_path.exists():
+                output = f"{proc.stderr}\n{proc.stdout}"
+                # darktable's rawspeed has genuine format gaps that LibRaw
+                # does not: no Foveon decoder at all, and no support for
+                # lossless-JPEG predictor 7 as written by some phone DNGs.
+                # Those are not our bug and must not read as a failure.
+                reason = _classify_failure(output)
+                if reason:
+                    raise UnsupportedFormat(
+                        f"darktable cannot decode {path.suffix.upper().lstrip('.')} "
+                        f"({reason})"
+                    )
                 raise RuntimeError(
                     f"darktable-cli produced no output for {path.name}: "
                     f"{proc.stderr.strip()[-400:] or proc.stdout.strip()[-400:]}"
@@ -287,6 +326,8 @@ class CompareReport:
     results: list[Comparison] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     unavailable: list[str] = field(default_factory=list)
+    #: (file, renderer, reason) for formats the other tool cannot decode.
+    unsupported: list[tuple[str, str, str]] = field(default_factory=list)
 
     def by_renderer(self, name: str) -> list[Comparison]:
         return [r for r in self.results if r.other == name]
@@ -307,6 +348,11 @@ class CompareReport:
                     f"      {r.sample:<38} {r.psnr:6.2f} dB  dE {r.delta_e:5.2f}{flag}"
                 )
             lines.append("")
+        if self.unsupported:
+            lines.append("not decodable by the other tool (viberoom renders these fine):")
+            for sample, renderer, reason in self.unsupported:
+                lines.append(f"    {sample:<38} {renderer}: {reason}")
+            lines.append("")
         for name in self.unavailable:
             lines.append(f"unavailable: {name}")
         for err in self.errors:
@@ -319,20 +365,27 @@ def compare_file(
     others: list[Renderer],
     baseline: Renderer | None = None,
     long_edge: int = ANALYSIS_LONG_EDGE,
-) -> tuple[list[Comparison], list[str]]:
-    """Render one file with viberoom and each other renderer, and score."""
+) -> tuple[list[Comparison], list[str], list[tuple[str, str, str]]]:
+    """Render one file with viberoom and each other renderer, and score.
+
+    Returns (comparisons, errors, unsupported).
+    """
     baseline = baseline or ViberoomRenderer()
     results: list[Comparison] = []
     errors: list[str] = []
+    unsupported: list[tuple[str, str, str]] = []
 
     try:
         ours = baseline.render(path)
     except Exception as exc:  # noqa: BLE001
-        return [], [f"{path.name}: viberoom render failed: {type(exc).__name__}: {exc}"]
+        return [], [f"{path.name}: viberoom render failed: {type(exc).__name__}: {exc}"], []
 
     for renderer in others:
         try:
             theirs = renderer.render(path)
+        except UnsupportedFormat as exc:
+            unsupported.append((path.name, renderer.name, str(exc)))
+            continue
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{path.name}: {renderer.name} failed: {type(exc).__name__}: {exc}")
             continue
@@ -351,7 +404,7 @@ def compare_file(
                 mean_rgb_other=tuple(float(b[..., i].mean()) for i in range(3)),
             )
         )
-    return results, errors
+    return results, errors, unsupported
 
 
 def run_comparison(
@@ -377,7 +430,8 @@ def run_comparison(
     for i, path in enumerate(files, start=1):
         if on_progress:
             on_progress(i, len(files), path)
-        results, errors = compare_file(path, others, long_edge=long_edge)
+        results, errors, unsupported = compare_file(path, others, long_edge=long_edge)
         report.results.extend(results)
         report.errors.extend(errors)
+        report.unsupported.extend(unsupported)
     return report

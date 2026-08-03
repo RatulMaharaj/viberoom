@@ -158,9 +158,48 @@ def test_viberoom_renderer_is_always_available():
 def test_compare_file_reports_error_for_undecodable_input(tmp_path):
     bad = tmp_path / "not_a_raw.CR2"
     bad.write_bytes(b"definitely not a raw file")
-    results, errors = cmp_mod.compare_file(bad, [LibRawRenderer()])
+    results, errors, unsupported = cmp_mod.compare_file(bad, [LibRawRenderer()])
     assert not results
+    assert not unsupported
     assert len(errors) == 1 and "viberoom render failed" in errors[0]
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        ("No decoder found. Sorry.", "no decoder found"),
+        ("Unsupported predictor mode: 7", "unsupported predictor"),
+        ("`x.X3F': Unsupported file format or not RAW file", "unsupported file format"),
+        ("could not export to file", None),
+        ("Segmentation fault", None),
+        ("", None),
+    ],
+)
+def test_classify_failure_separates_unsupported_from_broken(message, expected):
+    assert cmp_mod._classify_failure(message) == expected
+
+
+def test_unsupported_format_is_not_counted_as_an_error(tmp_path, monkeypatch):
+    """A format the other tool cannot decode must not read as a failure on
+    every run — there is nothing on our side to fix."""
+    img = tmp_path / "x.DNG"
+    img.write_bytes(b"stub")
+
+    monkeypatch.setattr(ViberoomRenderer, "render", lambda self, p: np.zeros((8, 8, 3), np.uint8))
+
+    def unsupported(self, p):
+        raise cmp_mod.UnsupportedFormat("darktable cannot decode DNG (unsupported predictor)")
+
+    monkeypatch.setattr(DarktableRenderer, "render", unsupported)
+    monkeypatch.setattr(DarktableRenderer, "available", lambda self: True)
+
+    report = cmp_mod.run_comparison([img], ["darktable"])
+    assert not report.errors
+    assert not report.results
+    assert len(report.unsupported) == 1
+    sample, renderer, reason = report.unsupported[0]
+    assert sample == "x.DNG" and renderer == "darktable" and "predictor" in reason
+    assert "viberoom renders these fine" in report.summary()
 
 
 def test_run_comparison_records_unavailable_renderers(tmp_path, monkeypatch):
