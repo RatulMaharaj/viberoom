@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowDown, ArrowUp, FolderOpen, RefreshCw } from 'lucide-react'
+import { Boxes, ArrowDown, ArrowUp, CheckSquare, Download, FolderOpen, RefreshCw, Square } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { api, type Filters, type Flag, type ImageMeta } from '../api'
 import { FlagBadge, RatingStars } from '../components/RatingStars'
 import { Brand } from '../components/Brand'
+import { useFolderChooser } from '../folderChooser'
+import { ExportDialog } from '../components/ExportDialog'
+import { OrganizePanel } from '../components/OrganizePanel'
 import { FolderPicker } from '../components/FolderPicker'
 import { ModuleTabs } from '../components/ModuleTabs'
 import { exifLine } from '../exif'
@@ -32,6 +35,11 @@ export function Library() {
   const [showPicker, setShowPicker] = useState(false)
   const [exts, setExts] = useState<string[]>([])
   const navigate = useNavigate()
+  const [multi, setMulti] = useState<string[]>([])
+  const [idFilter, setIdFilter] = useState<string[] | null>(null)
+  const [organize, setOrganize] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const { available: nativePicker, choose } = useFolderChooser()
 
   const refresh = useCallback(() => {
     api
@@ -132,12 +140,30 @@ export function Library() {
               Open
             </button>
           </div>
-          <button className="btn btn-ghost btn-sm" onClick={() => setShowPicker(true)}>
-            <FolderOpen size={14} fill="#e8b339" stroke="#e8b339" /> Browse folders…
-          </button>
+          <div className="flex gap-2">
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={async () => {
+                if (!nativePicker) return setShowPicker(true)
+                const picked = await choose(null)
+                if (picked) openLibrary(picked)
+              }}
+            >
+              <FolderOpen size={14} fill="#e8b339" stroke="#e8b339" /> Browse folders…
+            </button>
+            {nativePicker && (
+              <button className="btn btn-ghost btn-sm" onClick={() => setShowPicker(true)}>
+                Use the in-app tree
+              </button>
+            )}
+          </div>
           {error && <div className="alert alert-error text-sm">{error}</div>}
           {showPicker && (
-            <FolderPicker onSelect={openLibrary} onClose={() => setShowPicker(false)} />
+            <FolderPicker
+              onSelect={openLibrary}
+              onClose={() => setShowPicker(false)}
+              current={libraryPath}
+            />
           )}
         </div>
       </div>
@@ -213,18 +239,56 @@ export function Library() {
         <button className="btn btn-sm" onClick={() => api.scan().then(refresh)}>
           <RefreshCw size={14} /> Rescan
         </button>
+        <button
+          className="btn btn-sm"
+          title={multi.length ? 'Clear selection' : 'Select all shown'}
+          onClick={() => {
+            const shown = images.filter((im) => !idFilter || idFilter.includes(im.id))
+            setMulti(multi.length ? [] : shown.map((im) => im.id))
+          }}
+        >
+          {multi.length ? <Square size={14} /> : <CheckSquare size={14} />}
+          {multi.length ? `${multi.length} selected` : 'Select all'}
+        </button>
+        <button
+          className="btn btn-sm btn-primary"
+          title="Export the selection (or the current image)"
+          disabled={!multi.length && !selected}
+          onClick={() => setExportOpen(true)}
+        >
+          <Download size={14} /> Export…
+        </button>
+        <button
+          className={`btn btn-sm ${organize ? 'btn-primary' : ''}`}
+          title="Collections, stacks, merge, import, faces, map, tether"
+          onClick={() => setOrganize((v) => !v)}
+        >
+          <Boxes size={14} /> Organize
+        </button>
         <div className="divider divider-horizontal mx-0" />
         <ModuleTabs active="catalog" imageId={selected ?? undefined} />
       </div>
 
-      <div className="p-4 grid gap-4 grid-cols-[repeat(auto-fill,minmax(220px,1fr))]">
-        {images.map((im) => (
+      <div className="flex">
+      <div className="flex-1 p-4 grid gap-4 grid-cols-[repeat(auto-fill,minmax(220px,1fr))] content-start">
+        {images.filter((im) => !idFilter || idFilter.includes(im.id)).map((im) => (
           <div
             key={im.id}
             className={`card bg-base-200 shadow cursor-pointer transition overflow-hidden ${
-              selected === im.id ? 'outline-2 outline-primary' : ''
+              selected === im.id ? 'outline-2 outline-primary' : multi.includes(im.id) ? 'outline-2 outline-secondary' : ''
             }`}
-            onClick={() => setSelected(im.id)}
+            onClick={(e) => {
+              setSelected(im.id)
+              // cmd/ctrl or shift extends the multi-selection used by the
+              // Organize panel (stacks, merge, collections)
+              setMulti((m) =>
+                e.metaKey || e.ctrlKey || e.shiftKey
+                  ? m.includes(im.id)
+                    ? m.filter((x) => x !== im.id)
+                    : [...m, im.id]
+                  : [im.id],
+              )
+            }}
             onDoubleClick={() => navigate(`/edit/${im.id}`)}
           >
             <figure className="aspect-[3/2] bg-base-300 relative group">
@@ -259,8 +323,22 @@ export function Library() {
           <p className="opacity-60 col-span-full text-center py-16">No images match.</p>
         )}
       </div>
+      {exportOpen && (
+        <ExportDialog
+          imageIds={multi.length ? multi : selected ? [selected] : []}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
+      {organize && (
+        <OrganizePanel
+          selection={multi}
+          onRefresh={refresh}
+          onPickCollection={setIdFilter}
+        />
+      )}
+      </div>
       <div className="fixed bottom-2 right-4 text-xs font-mono text-base-content/60 bg-base-200/80 backdrop-blur rounded-full px-3 py-1.5 shadow">
-        ←→ select · 0-5 rate · P pick · X reject · U unflag · E/Enter loupe
+        ←→ select · ⌘-click multi · 0-5 rate · P pick · X reject · U unflag · E/Enter loupe
       </div>
     </div>
   )

@@ -6,18 +6,24 @@
 
 <p align="center"><em>Lightroom, minus the sliders. Your photos, developed by agents.</em></p>
 
-Viberoom is a RAW photo manager and non-destructive editor where **the editing UI
-is an AI agent**. You browse, rate, and flag in a web (or desktop) library —
-then tell Claude Code *"reject the blurry ones, warm up the sunsets, export the
-picks"* and it happens through MCP, REST, or plain JSON sidecar files.
+Viberoom is a RAW photo manager and non-destructive editor you can drive
+**by hand or by agent**. Edit with the full develop UI in the browser (or
+desktop app) — or tell Claude Code *"reject the blurry ones, warm up the
+sunsets, export the picks"* and it happens through MCP, REST, or plain JSON
+sidecar files.
 
 - 🧾 **Non-destructive, always.** Every edit is a readable `photo.CR3.vibe.json`
   next to the original. Delete the sidecar, get your pixels back.
 - 📷 **Real RAW.** LibRaw decoding (CR2/CR3, NEF, ARW, RAF, DNG, …) plus
   JPEG/PNG/TIFF/HEIC.
-- 🎛️ **The whole develop kit.** WB, tone, curves, HSL, color grading, LUTs,
-  sharpening/NR, lens & perspective corrections, heal/clone, grain — and local
-  masks: gradients, luminance/color ranges, brushes, AI subject/sky masks.
+- 🎛️ **The whole develop kit — in the UI and the API.** WB, tone, curves, HSL,
+  color grading, LUTs, sharpening/NR, lens & perspective corrections,
+  heal/clone, grain — and local masks: gradients, luminance/color ranges,
+  brushes, AI subject/sky masks. Everything the API can do is reachable from
+  the interface, and vice versa.
+- 🤖 **Claude Code in the sidebar.** If a local `claude` install is detected,
+  the robot icon opens a real Claude Code session wired to this library —
+  model/effort/permission picker, approve-deny prompts and all.
 - 🗂️ **DAM things.** Ratings, flags, labels, keywords, collections (smart too),
   stacks, dupes, history, snapshots, virtual copies, multi-folder catalogs.
 - 📥 **In and out.** Card ingest, tethered capture, HDR & pano merge, ML
@@ -46,12 +52,13 @@ uv run build-desktop   # installers: .dmg / .msi / .AppImage — see desktop/REA
 ## Let an agent drive
 
 ```bash
-claude mcp add viberoom -- uv --directory /path/to/viberoom run viberoom-mcp
+claude mcp add --transport http viberoom http://127.0.0.1:8423/mcp
 ```
 
-~45 tools, from `list_images` to `update_recipe` (the workhorse merge-patch) to
-`render_preview` — which returns the rendered image, so the agent can *look at
-its own edits* and iterate. Then just talk:
+The MCP server is mounted on the viberoom server itself — just a URL, no paths
+to keep in sync. ~45 tools, from `list_images` to `update_recipe` (the
+workhorse merge-patch) to `render_preview` — which returns the rendered image,
+so the agent can *look at its own edits* and iterate. Then just talk:
 
 > "Open ~/Photos/shoot-42, reject anything blurry, rate the keepers, warm the
 > sunset shots by 500K with +0.3 EV, and export all picks at quality 85."
@@ -93,15 +100,18 @@ uv run viberoom-bench regress    # 26 recipes vs a pinned baseline; the CI gate.
 uv run viberoom-bench chart      # 24 ColorChecker patches, mean dE2000
 uv run viberoom-bench pack       # ~260 MB CC0 RAW pack (X-Trans, Foveon, CRAW…)
 uv run viberoom-bench compare --against libraw darktable
+uv run viberoom-bench auto       # degrade → recover → score, no dataset needed
 uv run viberoom-bench reference --inputs raw/ --references expertC/
 ```
 
 `compare` treats **libraw as an oracle** (a no-op render must match its neutral
 decode: 53–55 dB PSNR on Bayer) and **darktable as a reference** (different
 rendering philosophy, so dE 5–14 means "same neighbourhood", not "bug").
-`reference` scores auto-adjust against expert retouches — if `auto` isn't
-beating `noop`, it's making things worse. `viberoom-bench datasets` lists
-where the big datasets live and what each one proves.
+`auto` degrades an image by a known amount and scores the recovery — exact
+ground truth, no dataset (`wb` mode is the real pass/fail; `--strategy auto`
+is diagnostic only). `reference` scores auto-adjust against expert retouches —
+if `auto` isn't beating `noop`, it's making things worse. `viberoom-bench
+datasets` lists where the big datasets live and what each one proves.
 
 ## Development
 

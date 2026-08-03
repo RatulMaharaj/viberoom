@@ -3,14 +3,19 @@ and the MCP server alike."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
+from viberoom import agent
+from viberoom import mcp_server, permission_mcp
 from viberoom import presets as preset_store
 from viberoom import state
 from viberoom.catalog.scanner import scan
@@ -29,17 +34,44 @@ from viberoom.recipe.sidecar import (
     save_sidecar,
 )
 
-app = FastAPI(title="viberoom", version="0.1.0")
-api = FastAPI(title="viberoom API")
-app.mount("/api/v1", api)
+# MCP over HTTP, mounted on this same server: agents connect with a URL
+# (`claude mcp add --transport http viberoom http://127.0.0.1:8423/mcp`)
+# instead of a stdio command with an absolute path to this checkout.
+_mcp_app = mcp_server.mcp.streamable_http_app(streamable_http_path="/mcp")
+_approve_app = permission_mcp.mcp.streamable_http_app(streamable_http_path="/mcp-approve")
 
 
-@app.on_event("startup")
-def _restore_library() -> None:
+_mcp_stack: AsyncExitStack | None = None
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    global _mcp_stack
     lib = load_last_library()
     if lib is not None:
         state.open_library(lib)
         scan(lib, state.db())
+    # The MCP session managers are single-use, but tests enter this lifespan
+    # once per TestClient — so start them at most once and leave them up for
+    # the life of the process.
+    if _mcp_stack is None:
+        _mcp_stack = AsyncExitStack()
+        await _mcp_stack.enter_async_context(
+            _mcp_app.router.lifespan_context(_mcp_app)
+        )
+        await _mcp_stack.enter_async_context(
+            _approve_app.router.lifespan_context(_approve_app)
+        )
+    yield
+
+
+app = FastAPI(title="viberoom", version="0.1.0", lifespan=_lifespan)
+api = FastAPI(title="viberoom API")
+app.mount("/api/v1", api)
+# Adopt the sub-apps' routes rather than mounting them: a Mount strips its
+# prefix, which would make the URLs /mcp/mcp or force a trailing slash.
+app.router.routes.extend(_mcp_app.routes)
+app.router.routes.extend(_approve_app.routes)
 
 
 # ---------- library ----------
@@ -238,6 +270,107 @@ def get_current() -> dict:
     }
 
 
+# ---------- embedded Claude Code session ----------
+
+def _agent_session():
+    """The session for the open library, spawning `claude` lazily."""
+    lib = state.require_library()
+    port = os.environ.get("VIBEROOM_PORT", "8423")
+    return agent.session(lib.root, f"http://127.0.0.1:{port}")
+
+
+@api.get("/agent/status")
+def agent_status() -> dict:
+    """Whether a local `claude` install was found, and whether a session is up."""
+    info = agent.detect()
+    sess = agent.current()
+    lib = state.library_or_none()
+    return {
+        **info,
+        "running": bool(sess and sess.running),
+        "session_id": sess.session_id if sess else None,
+        "cwd": str(lib.root) if lib else None,
+        "config": dict(sess.config) if sess else dict(agent.DEFAULT_CONFIG),
+        "options": {
+            "model": agent.MODELS,
+            "effort": agent.EFFORTS,
+            "permission_mode": agent.PERMISSION_MODES,
+        },
+    }
+
+
+class PermissionRequestIn(BaseModel):
+    tool_name: str
+    input: dict = Field(default_factory=dict)
+    tool_use_id: str = ""
+
+
+@api.post("/agent/permission/request")
+async def agent_permission_request(body: PermissionRequestIn) -> dict:
+    """Called by the permission MCP server; blocks until the user decides."""
+    sess = agent.current()
+    if sess is None:
+        return {"behavior": "deny", "message": "No agent session is open."}
+    return await agent.broker.ask(sess, body.tool_name, body.input)
+
+
+@api.websocket("/agent/ws")
+async def agent_ws(ws: WebSocket) -> None:
+    """Bidirectional bridge between the sidebar and the `claude` subprocess."""
+    await ws.accept()
+    try:
+        sess = _agent_session()
+    except HTTPException as e:
+        await ws.send_json({"type": "error", "message": e.detail})
+        await ws.close()
+        return
+
+    queue = sess.subscribe()
+    for frame in sess.replay():
+        await ws.send_json(frame)
+    await ws.send_json({"type": "status", "running": sess.running, "cwd": str(sess.cwd)})
+
+    async def push() -> None:
+        while True:
+            await ws.send_json(await queue.get())
+
+    pusher = asyncio.create_task(push())
+    try:
+        while True:
+            msg = await ws.receive_json()
+            kind = msg.get("type")
+            if kind == "user":
+                text = (msg.get("text") or "").strip()
+                if text:
+                    await sess.send(_with_context(text, msg.get("image_id")), echo=text)
+            elif kind == "permission":
+                agent.broker.resolve(msg.get("id", ""), bool(msg.get("allow")))
+            elif kind == "config":
+                await sess.configure(msg.get("config") or {})
+            elif kind == "reset":
+                await sess.stop()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        pusher.cancel()
+        sess.unsubscribe(queue)
+
+
+def _with_context(text: str, image_id: str | None) -> str:
+    """Tell the agent which photo the user is looking at, so \"this one\" works."""
+    iid = image_id or _current_image
+    if iid is None:
+        return text
+    rows = state.db().query("SELECT rel_path FROM images WHERE id=?", (iid,))
+    if not rows:
+        return text
+    return (
+        f"<viberoom-context>Currently open image: {rows[0]['rel_path']} "
+        f"(id {iid}). Use the viberoom MCP tools to inspect or edit it."
+        "</viberoom-context>\n\n" + text
+    )
+
+
 # ---------- change events: push sidecar edits to the UI live ----------
 
 @api.get("/events")
@@ -292,29 +425,109 @@ def _sync_sidecar_to_db(image_id: str) -> None:
 # ---------- filesystem browser (for the folder picker UI) ----------
 
 @api.get("/fs")
-def browse_fs(path: str | None = None) -> dict:
+def browse_fs(path: str | None = None, hidden: bool = False) -> dict:
     """List subdirectories of a path so the UI can offer a folder picker.
-    With no path, returns sensible roots: home and mounted volumes."""
+    With no path, returns sensible roots: home and mounted volumes.
+    Dot-directories are omitted unless `hidden` is set."""
+
+    def keep(c: Path) -> bool:
+        return c.is_dir() and (hidden or not c.name.startswith("."))
+
     if path is None:
         roots = [str(Path.home())]
         volumes = Path("/Volumes")
         if volumes.is_dir():
-            roots += sorted(
-                str(v) for v in volumes.iterdir() if v.is_dir() and not v.name.startswith(".")
-            )
+            roots += sorted(str(v) for v in volumes.iterdir() if keep(v))
         return {"path": None, "parent": None, "dirs": roots}
 
     p = Path(path).expanduser()
     if not p.is_dir():
         raise HTTPException(400, f"Not a directory: {p}")
     try:
-        dirs = sorted(
-            str(c) for c in p.iterdir() if c.is_dir() and not c.name.startswith(".")
-        )
+        dirs = sorted(str(c) for c in p.iterdir() if keep(c))
     except PermissionError:
         raise HTTPException(403, f"Permission denied: {p}")
     parent = None if p == p.parent else str(p.parent)
     return {"path": str(p), "parent": parent, "dirs": dirs}
+
+
+def _native_picker_cmd(start: str | None) -> list[str] | None:
+    """The platform's folder-chooser, or None if we can't offer one.
+
+    Only meaningful because viberoom is a local app: the dialog opens on the
+    same machine as the browser. Remote use falls back to the tree picker.
+    """
+    import shutil as _shutil
+    import sys as _sys
+
+    if _sys.platform == "darwin":
+        default = f'default location POSIX file "{start}" ' if start else ""
+        return [
+            "osascript",
+            "-e", 'tell application "System Events" to activate',
+            "-e", f'POSIX path of (choose folder with prompt "Export to" {default})',
+        ]
+    if _shutil.which("zenity"):
+        return ["zenity", "--file-selection", "--directory", *(["--filename", start] if start else [])]
+    if _shutil.which("kdialog"):
+        return ["kdialog", "--getexistingdirectory", start or "."]
+    return None
+
+
+@api.get("/fs/native-picker")
+def native_picker_available() -> dict:
+    return {"available": _native_picker_cmd(None) is not None}
+
+
+class NativePickerIn(BaseModel):
+    start: str | None = None
+
+
+@api.post("/fs/native-picker")
+def native_picker(body: NativePickerIn) -> dict:
+    """Open the OS folder dialog and return what was chosen.
+
+    Blocks until the user answers, so it runs in FastAPI's threadpool (this is
+    a sync endpoint on purpose).
+    """
+    cmd = _native_picker_cmd(body.start)
+    if cmd is None:
+        raise HTTPException(501, "No native folder dialog on this platform.")
+    import subprocess as _sp
+
+    try:
+        out = _sp.run(cmd, capture_output=True, text=True, timeout=300)
+    except _sp.TimeoutExpired:
+        raise HTTPException(504, "Folder dialog timed out.")
+    path = out.stdout.strip()
+    if out.returncode != 0 or not path:
+        # Cancelling is a normal outcome, not an error.
+        return {"path": None, "cancelled": True}
+    return {"path": path.rstrip("/") or "/", "cancelled": False}
+
+
+class MkdirIn(BaseModel):
+    parent: str
+    name: str
+
+
+@api.post("/fs/mkdir")
+def make_dir(body: MkdirIn) -> dict:
+    """Create a folder, so the picker can make one without leaving the app."""
+    name = body.name.strip()
+    if not name or "/" in name or name in {".", ".."}:
+        raise HTTPException(400, "Folder name must be a single path segment.")
+    parent = Path(body.parent).expanduser()
+    if not parent.is_dir():
+        raise HTTPException(400, f"Not a directory: {parent}")
+    target = parent / name
+    if target.exists():
+        raise HTTPException(409, f"Already exists: {target}")
+    try:
+        target.mkdir(parents=False)
+    except PermissionError:
+        raise HTTPException(403, f"Permission denied: {parent}")
+    return {"path": str(target)}
 
 
 # ---------- images ----------
@@ -1259,6 +1472,10 @@ class ExportIn(BaseModel):
     preset: str | None = Field(
         default=None, description="Export preset name; explicit fields override its settings."
     )
+    dest_dir: str | None = Field(
+        default=None,
+        description="Directory to write into. Defaults to <library>/exports.",
+    )
     path: str | None = None
 
 
@@ -1277,6 +1494,11 @@ def _resolve_export_preset(body: ExportIn, extra_exclude: set[str] | None = None
         return ExportIn(**{**settings, **explicit})
     except ValidationError as e:
         raise HTTPException(422, e.errors(include_url=False))
+
+
+def _export_base(body: ExportIn, lib) -> Path:
+    """Where exports land: the chosen folder, else <library>/exports."""
+    return Path(body.dest_dir).expanduser() if body.dest_dir else lib.exports_dir
 
 
 def _export_one(image_id: str, body: ExportIn, filename: str | None = None, seq: int = 1) -> dict:
@@ -1302,9 +1524,9 @@ def _export_one(image_id: str, body: ExportIn, filename: str | None = None, seq:
             )
         except (ValueError, KeyError, IndexError) as e:
             raise HTTPException(422, f"bad filename template: {e}")
-        out = lib.exports_dir / rel
+        out = _export_base(body, lib) / rel
     else:
-        out = lib.exports_dir / (src.stem + suffix + default_extension(body.format))
+        out = _export_base(body, lib) / (src.stem + suffix + default_extension(body.format))
     result = export_file(
         src, recipe, out, body.format,
         quality=body.quality, bit_depth=body.bit_depth, max_dimension=body.max_dimension,
@@ -1570,8 +1792,6 @@ if _frontend_dist.is_dir():
 
 def main() -> None:
     import uvicorn
-
-    import os
 
     port = int(os.environ.get("VIBEROOM_PORT", "8423"))  # VIBE on a phone keypad
     # pass the app object (not an import string): required under PyInstaller,

@@ -177,6 +177,17 @@
 .vr-slider-luma:hover::-moz-range-track {
   background: linear-gradient(to right, #1c1c1c, #6a6a6a, #e0e0e0);
 }
+/* Hue rails are per-slider — the full wheel for absolute hue sliders, a local
+ * sweep around the band center for the relative HSL ones — so the gradient
+ * arrives inline as --vr-rail rather than being baked in here. */
+.vr-slider-hue::-webkit-slider-runnable-track,
+.vr-slider-hue:hover::-webkit-slider-runnable-track {
+  background: var(--vr-rail);
+}
+.vr-slider-hue::-moz-range-track,
+.vr-slider-hue:hover::-moz-range-track {
+  background: var(--vr-rail);
+}
 /* grey-to-colorful for saturation/vibrance */
 .vr-slider-sat::-webkit-slider-runnable-track,
 .vr-slider-sat:hover::-webkit-slider-runnable-track {

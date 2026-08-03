@@ -1,13 +1,16 @@
 import { useEffect, useState } from 'react'
 import { FolderOpen } from 'lucide-react'
 import { api } from '../api'
+import { useFolderChooser } from '../folderChooser'
 import { FolderPicker } from './FolderPicker'
 
-/** Logo with the current library folder underneath. Clicking the folder
- * opens the picker; changing folder reloads into the Catalog. */
-export function Brand() {
+/** Logo, optionally with the current library folder underneath. Clicking the
+ * folder opens the picker; changing folder reloads into the Catalog.
+ * Switching library is a Catalog-level action, so Develop hides it. */
+export function Brand({ showFolder = true }: { showFolder?: boolean }) {
   const [libraryPath, setLibraryPath] = useState<string | null>(null)
   const [showPicker, setShowPicker] = useState(false)
+  const { available: nativePicker, choose } = useFolderChooser()
 
   useEffect(() => {
     api.getLibrary().then((r) => setLibraryPath(r.library))
@@ -19,22 +22,34 @@ export function Brand() {
   }
 
   return (
-    <div className="flex flex-col items-start leading-tight shrink-0">
+    <div className="flex items-center gap-2 leading-tight shrink-0">
       <span className="flex items-center gap-1.5">
         <img src="/favicon.png" alt="" className="w-5 h-5" />
         <span className="font-brand font-bold text-lg tracking-tight">Viberoom</span>
       </span>
+      {showFolder && (
       <button
-        className="flex items-center gap-1 text-xs opacity-70 hover:opacity-100"
+        className="flex items-center gap-1 text-xs opacity-70 hover:opacity-100 border-l border-base-content/20 pl-2"
         title={libraryPath ? `${libraryPath} — click to change folder` : 'Choose folder'}
-        onClick={() => setShowPicker(true)}
+        onClick={async () => {
+          if (!nativePicker) return setShowPicker(true)
+          const picked = await choose(libraryPath)
+          if (picked) openLibrary(picked)
+        }}
       >
         <FolderOpen size={11} fill="#e8b339" stroke="#e8b339" />
         <span className="max-w-40 truncate">
           {libraryPath ? libraryPath.split('/').filter(Boolean).pop() : 'choose folder…'}
         </span>
       </button>
-      {showPicker && <FolderPicker onSelect={openLibrary} onClose={() => setShowPicker(false)} />}
+      )}
+      {showFolder && showPicker && (
+        <FolderPicker
+          onSelect={openLibrary}
+          onClose={() => setShowPicker(false)}
+          current={libraryPath}
+        />
+      )}
     </div>
   )
 }
