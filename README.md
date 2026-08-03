@@ -4,7 +4,7 @@
 
 <h1 align="center">Viberoom</h1>
 
-<p align="center"><em>Lightroom, minus the sliders. Your photos, developed by agents.</em></p>
+<p align="center"><em>All the sliders — and an agent that can drive them.</em></p>
 
 Viberoom is a RAW photo manager and non-destructive editor you can drive
 **by hand or by agent**. Edit with the full develop UI in the browser (or
@@ -30,16 +30,38 @@ sidecar files.
   enhance (`viberoom[ml]`), XMP interop, batch everything, color-managed
   export (sRGB → ProPhoto) with watermarks and soft proofing.
 
-## Quick start
+## Setup from source
+
+| | Version | Why |
+|---|---|---|
+| **Python** | 3.12+ | `pyproject.toml` floor; 3.13 is fine |
+| **Node** | 20.19+ or 22.12+ | what Vite 8 requires |
+| **[uv](https://docs.astral.sh/uv/)** | any recent | resolves and runs the backend |
+| **Rust** | stable, via `rustup` | *desktop app only* — skip for web |
+
+Nothing else. LibRaw and the image codecs arrive inside the `rawpy` and Pillow
+wheels, so there's no Homebrew/apt step and no compiler needed for the web app.
 
 ```bash
-uv sync
-npm --prefix frontend install && npm --prefix frontend run build
+git clone https://github.com/RatulMaharaj/viberoom.git
+cd viberoom
 
-uv run viberoom        # UI + API → http://127.0.0.1:8423
+uv sync                                  # backend deps into .venv (uv installs Python if missing)
+npm --prefix frontend install
+npm --prefix frontend run build          # typechecks, then writes frontend/dist
+
+uv run viberoom                          # UI + API → http://127.0.0.1:8423
 ```
 
-Open it, point it at a folder of photos. That's it.
+Open it, point it at a folder of photos. That's it — no database to provision,
+no config file.
+
+Optional extras:
+
+```bash
+uv sync --extra ml     # AI subject/sky masks, face detection, ML enhance
+                       #   (onnxruntime + rembg; weights download on first use)
+```
 
 Other ways to run:
 
@@ -48,6 +70,15 @@ uv run dev             # hacking: backend --reload + Vite (:7666 "ROOM" → :842
 uv run dev-desktop     # the desktop app, dev mode
 uv run build-desktop   # installers: .dmg / .msi / .AppImage — see desktop/README.md
 ```
+
+The desktop build additionally needs Rust, and on Linux
+`libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf` —
+see [desktop/README.md](desktop/README.md).
+
+If something's off: `npm run build` failing on syntax that looks fine usually
+means Node is below the Vite floor (`node -v`), and a `uv sync` that resolves
+oddly usually means an old uv (`uv self update`). The frontend must be built at
+least once — without `frontend/dist` the backend serves the API but no UI.
 
 ## Let an agent drive
 
@@ -121,4 +152,5 @@ npm --prefix frontend run build   # frontend typecheck + build
 ```
 
 State lives in `<library>/.viberoom/` — a disposable SQLite index (sidecars are
-the source of truth) and the preview cache. Exports land in `<library>/exports/`.
+the source of truth) and the preview cache. Exports land in
+`<library>/exports/` unless you pick another folder.
