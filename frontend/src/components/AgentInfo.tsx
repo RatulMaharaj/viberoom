@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { Bot, Check, Copy } from 'lucide-react'
+import { Check, Copy, Plug } from 'lucide-react'
 
-const MCP_CMD = 'claude mcp add viberoom -- uv --directory /path/to/viberoom run viberoom-mcp'
+const MCP_CMD = 'claude mcp add --transport http viberoom http://127.0.0.1:8423/mcp'
 const API_URL = `${window.location.origin}/api/v1`
 
 function CopyRow({ label, value }: { label: string; value: string }) {
@@ -34,22 +34,23 @@ export function AgentInfoButton() {
     <>
       <button
         className="btn btn-sm btn-ghost btn-square"
-        title="Connect an agent (Claude Code, etc.)"
+        title="Connect an external agent (MCP / REST)"
         onClick={() => setOpen(true)}
       >
-        <Bot size={16} />
+        <Plug size={16} />
       </button>
       {open && (
         <dialog className="modal modal-open">
           <div className="modal-box max-w-xl">
             <h3 className="font-bold flex items-center gap-2">
-              <Bot size={18} /> Point your agent here
+              <Plug size={18} /> Point your agent here
             </h3>
             <p className="text-sm opacity-70 mt-1 mb-3">
-              All editing in Viberoom is agent-drivable. Three ways in:
+              All editing in Viberoom is agent-drivable. Use the sidebar for a session
+              right here, or connect your own agent:
             </p>
             <div className="space-y-3">
-              <CopyRow label="MCP (Claude Code) — typed tools incl. get_current_image, update_recipe, render_preview" value={MCP_CMD} />
+              <CopyRow label="MCP (Claude Code) — served over HTTP by this server; no paths to keep in sync" value={MCP_CMD} />
               <CopyRow label="REST API — interactive docs at /api/v1/docs" value={API_URL} />
               <CopyRow
                 label="Sidecar files — edit JSON next to your images, then rescan"

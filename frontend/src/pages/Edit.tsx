@@ -30,6 +30,7 @@ export function Edit() {
   const [liveFilter, setLiveFilter] = useState('')
   const [renderTick, setRenderTick] = useState(0)
   const [cropMode, setCropMode] = useState(false)
+  const [proof, setProof] = useState<string | null>(null)
 
   const refreshAll = useCallback(() => {
     setBust(String(Date.now()))
@@ -156,7 +157,7 @@ export function Edit() {
   }
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden">
+    <div className="h-full flex flex-col overflow-hidden">
       {!fullscreen && (
         <div className="navbar bg-base-200 gap-2 px-4 min-h-12">
           <Brand />
@@ -175,7 +176,7 @@ export function Edit() {
           >
             <Crop size={14} />
           </button>
-          <button className="btn btn-sm btn-ghost" title="Fullscreen (F)" onClick={toggleFullscreen}>
+            <button className="btn btn-sm btn-ghost" title="Fullscreen (F)" onClick={toggleFullscreen}>
             <Maximize size={14} />
           </button>
           <button className="btn btn-sm btn-primary" onClick={doExport} disabled={exporting || !id}>
@@ -205,12 +206,21 @@ export function Edit() {
         {id && (
           <ZoomableImage
             resetKey={id}
-            src={api.previewUrl(id, zoomed ? 4096 : 2048, bust, showBefore)}
+            src={
+              proof
+                ? api.proofUrl(id, proof, true, zoomed ? 4096 : 2048, bust)
+                : api.previewUrl(id, zoomed ? 4096 : 2048, bust, showBefore)
+            }
             alt={image?.filename ?? ''}
             filter={liveFilter}
             onZoomChange={setZoomed}
             onLoaded={() => setRenderTick((t) => t + 1)}
           />
+        )}
+        {proof && (
+          <span className="absolute top-3 right-3 badge badge-warning gap-1 font-mono">
+            Soft proof — {proof}
+          </span>
         )}
         {showBefore && (
           <span className="absolute top-3 left-3 badge badge-neutral gap-1 font-mono">
@@ -245,6 +255,7 @@ export function Edit() {
           version={panelVersion}
           renderTick={renderTick}
           onLiveFilter={setLiveFilter}
+          onProof={setProof}
           onRecipeChange={() => {
             setBust(String(Date.now()))
             load()

@@ -30,8 +30,13 @@ Codex, …) through a REST API, MCP tools, or by writing JSON sidecar files dire
   IPTC metadata embedded in exports.
 - **Presets & batch**: develop presets, export presets, batch recipe sync,
   batch metadata, batch export with filename templates.
-- **Web UI for library management only**: browse a local folder, star-rate (0–5),
-  flag pick/reject, view rendered previews and recipes. No sliders.
+- **Full web UI**: browse and organize a local folder, star-rate (0–5), flag
+  pick/reject, and develop images with the complete toolset — tone, colour,
+  HSL, grading, optics, effects, masks, LUTs, history and snapshots. Everything
+  the API can do is reachable from the interface, and vice versa.
+- **Claude Code in the sidebar**: if a local `claude` install is detected, the
+  robot icon opens a real Claude Code session wired to this library, with a
+  model / effort / permission picker and approve-deny prompts for tool use.
 - **Export** to JPEG/TIFF or PNG (8/16-bit) in sRGB, Display P3, Adobe RGB or
   ProPhoto (generated ICC embedded), with watermarking, output sharpening
   and soft proofing.
@@ -53,10 +58,11 @@ Open http://127.0.0.1:8423, point it at a photo folder. For frontend dev:
 ### MCP (recommended)
 
 ```bash
-claude mcp add viberoom -- uv --directory /path/to/viberoom run viberoom-mcp
+claude mcp add --transport http viberoom http://127.0.0.1:8423/mcp
 ```
 
-The REST server must be running. ~45 tools; highlights: `set_library`,
+The MCP server is mounted on the viberoom server itself, so it's just a URL —
+no paths to keep in sync. The REST server must be running. ~45 tools; highlights: `set_library`,
 `library_roots`, `import_photos`, `list_images` (filter by rating/flag/label/
 keyword/camera/lens/ISO/date/filename/folder/collection/GPS/faces/stacks),
 `get_image`, `set_rating`, `set_flag`, `set_label`, `edit_keywords`,

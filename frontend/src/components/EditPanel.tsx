@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { FileImage, Pencil, RotateCcw, Wand2 } from 'lucide-react'
+import { ChevronRight, FileImage, Pencil, RotateCcw, Wand2 } from 'lucide-react'
 import { api } from '../api'
 import { pushAction } from '../undo'
+import { DevelopExtras } from './DevelopExtras'
 import { Histogram } from './Histogram'
 
 interface SliderDef {
@@ -15,7 +16,10 @@ interface SliderDef {
   rail?: 'temp' | 'tint' | 'luma' | 'sat'
 }
 
-const GROUPS: { title: string; sliders: SliderDef[] }[] = [
+/** Groups marked collapsed start folded — there are far more controls than
+ *  fit on screen, and most shots never touch HSL or optics. */
+
+const GROUPS: { title: string; sliders: SliderDef[]; collapsed?: boolean }[] = [
   {
     title: 'White Balance',
     sliders: [
@@ -37,6 +41,9 @@ const GROUPS: { title: string; sliders: SliderDef[] }[] = [
   {
     title: 'Presence',
     sliders: [
+      { label: 'Texture', path: ['tone', 'texture'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Clarity', path: ['tone', 'clarity'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Dehaze', path: ['tone', 'dehaze'], min: -100, max: 100, step: 1, def: 0 },
       { label: 'Vibrance', path: ['color', 'vibrance'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
       { label: 'Saturation', path: ['color', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
     ],
@@ -45,11 +52,152 @@ const GROUPS: { title: string; sliders: SliderDef[] }[] = [
     title: 'Detail',
     sliders: [
       { label: 'Sharpening', path: ['detail', 'sharpening', 'amount'], min: 0, max: 150, step: 1, def: 0 },
+      { label: 'Radius', path: ['detail', 'sharpening', 'radius'], min: 0.5, max: 3, step: 0.1, def: 1 },
+      { label: 'Detail', path: ['detail', 'sharpening', 'detail'], min: 0, max: 100, step: 1, def: 25 },
       { label: 'NR Luminance', path: ['detail', 'noiseReduction', 'luminance'], min: 0, max: 100, step: 1, def: 0 },
       { label: 'NR Color', path: ['detail', 'noiseReduction', 'color'], min: 0, max: 100, step: 1, def: 0 },
     ],
   },
+  {
+    title: 'Grading — Shadows',
+    collapsed: true,
+    sliders: [
+      { label: 'Hue', path: ['color', 'grading', 'shadows', 'hue'], min: 0, max: 360, step: 1, def: 0 },
+      { label: 'Saturation', path: ['color', 'grading', 'shadows', 'saturation'], min: 0, max: 100, step: 1, def: 0, rail: 'sat' },
+      { label: 'Luminance', path: ['color', 'grading', 'shadows', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+    ],
+  },
+  {
+    title: 'Grading — Midtones',
+    collapsed: true,
+    sliders: [
+      { label: 'Hue', path: ['color', 'grading', 'midtones', 'hue'], min: 0, max: 360, step: 1, def: 0 },
+      { label: 'Saturation', path: ['color', 'grading', 'midtones', 'saturation'], min: 0, max: 100, step: 1, def: 0, rail: 'sat' },
+      { label: 'Luminance', path: ['color', 'grading', 'midtones', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+    ],
+  },
+  {
+    title: 'Grading — Highlights',
+    collapsed: true,
+    sliders: [
+      { label: 'Hue', path: ['color', 'grading', 'highlights', 'hue'], min: 0, max: 360, step: 1, def: 0 },
+      { label: 'Saturation', path: ['color', 'grading', 'highlights', 'saturation'], min: 0, max: 100, step: 1, def: 0, rail: 'sat' },
+      { label: 'Luminance', path: ['color', 'grading', 'highlights', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+    ],
+  },
+  {
+    title: 'Optics',
+    collapsed: true,
+    sliders: [
+      { label: 'Distortion', path: ['lens', 'distortion'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Vignetting', path: ['lens', 'vignette'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'CA Red/Cyan', path: ['lens', 'caRed'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'CA Blue/Yellow', path: ['lens', 'caBlue'], min: -100, max: 100, step: 1, def: 0 },
+    ],
+  },
+  {
+    title: 'Geometry',
+    collapsed: true,
+    sliders: [
+      { label: 'Rotate', path: ['geometry', 'rotate'], min: -45, max: 45, step: 0.1, def: 0 },
+      { label: 'Vertical', path: ['geometry', 'perspective', 'vertical'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Horizontal', path: ['geometry', 'perspective', 'horizontal'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Scale', path: ['geometry', 'perspective', 'scale'], min: 50, max: 150, step: 1, def: 100 },
+    ],
+  },
+  {
+    title: 'Effects',
+    collapsed: true,
+    sliders: [
+      { label: 'Vignette', path: ['effects', 'vignette', 'amount'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Midpoint', path: ['effects', 'vignette', 'midpoint'], min: 0, max: 100, step: 1, def: 50 },
+      { label: 'Feather', path: ['effects', 'vignette', 'feather'], min: 0, max: 100, step: 1, def: 50 },
+      { label: 'Roundness', path: ['effects', 'vignette', 'roundness'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Grain', path: ['effects', 'grain', 'amount'], min: 0, max: 100, step: 1, def: 0 },
+      { label: 'Grain Size', path: ['effects', 'grain', 'size'], min: 0, max: 100, step: 1, def: 25 },
+    ],
+  },
+  {
+    title: 'HSL — Red',
+    collapsed: true,
+    sliders: [
+      { label: 'Hue', path: ['color', 'hsl', 'red', 'hue'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Saturation', path: ['color', 'hsl', 'red', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
+      { label: 'Luminance', path: ['color', 'hsl', 'red', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+    ],
+  },
+  {
+    title: 'HSL — Orange',
+    collapsed: true,
+    sliders: [
+      { label: 'Hue', path: ['color', 'hsl', 'orange', 'hue'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Saturation', path: ['color', 'hsl', 'orange', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
+      { label: 'Luminance', path: ['color', 'hsl', 'orange', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+    ],
+  },
+  {
+    title: 'HSL — Yellow',
+    collapsed: true,
+    sliders: [
+      { label: 'Hue', path: ['color', 'hsl', 'yellow', 'hue'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Saturation', path: ['color', 'hsl', 'yellow', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
+      { label: 'Luminance', path: ['color', 'hsl', 'yellow', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+    ],
+  },
+  {
+    title: 'HSL — Green',
+    collapsed: true,
+    sliders: [
+      { label: 'Hue', path: ['color', 'hsl', 'green', 'hue'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Saturation', path: ['color', 'hsl', 'green', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
+      { label: 'Luminance', path: ['color', 'hsl', 'green', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+    ],
+  },
+  {
+    title: 'HSL — Aqua',
+    collapsed: true,
+    sliders: [
+      { label: 'Hue', path: ['color', 'hsl', 'aqua', 'hue'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Saturation', path: ['color', 'hsl', 'aqua', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
+      { label: 'Luminance', path: ['color', 'hsl', 'aqua', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+    ],
+  },
+  {
+    title: 'HSL — Blue',
+    collapsed: true,
+    sliders: [
+      { label: 'Hue', path: ['color', 'hsl', 'blue', 'hue'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Saturation', path: ['color', 'hsl', 'blue', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
+      { label: 'Luminance', path: ['color', 'hsl', 'blue', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+    ],
+  },
+  {
+    title: 'HSL — Purple',
+    collapsed: true,
+    sliders: [
+      { label: 'Hue', path: ['color', 'hsl', 'purple', 'hue'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Saturation', path: ['color', 'hsl', 'purple', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
+      { label: 'Luminance', path: ['color', 'hsl', 'purple', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+    ],
+  },
+  {
+    title: 'HSL — Magenta',
+    collapsed: true,
+    sliders: [
+      { label: 'Hue', path: ['color', 'hsl', 'magenta', 'hue'], min: -100, max: 100, step: 1, def: 0 },
+      { label: 'Saturation', path: ['color', 'hsl', 'magenta', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
+      { label: 'Luminance', path: ['color', 'hsl', 'magenta', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+    ],
+  },
 ]
+
+/** Does a folded group hold a non-default value? Drives the dot marker so
+ *  edits can't hide inside a collapsed section. */
+const groupTouched = (recipe: any, g: { sliders: SliderDef[] }) =>
+  g.sliders.some((s) => {
+    const v = getAt(recipe, s.path)
+    return v != null && v !== s.def
+  })
 
 const getAt = (obj: any, path: string[]) => path.reduce((o, k) => o?.[k], obj)
 const patchFor = (path: string[], value: number | null): object =>
@@ -71,6 +219,7 @@ function liveDeltaFilter(cur: any, base: any): string {
 }
 
 export function EditPanel({
+  onProof,
   imageId,
   previewSrc,
   isRaw,
@@ -91,7 +240,12 @@ export function EditPanel({
   onRecipeChange: () => void
   /** instant CSS-filter feedback while dragging (cleared when render lands) */
   onLiveFilter?: (filter: string) => void
+  onProof: (space: string | null) => void
 }) {
+  const [folded, setFolded] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(GROUPS.filter((g) => g.collapsed).map((g) => [g.title, true])),
+  )
+  const [versionTick, setVersionTick] = useState(0)
   const [recipe, setRecipeState] = useState<Record<string, any> | null>(null)
   const recipeRef = useRef<Record<string, any> | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -114,7 +268,7 @@ export function EditPanel({
       onLiveFilter?.('')
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imageId, version])
+  }, [imageId, version, versionTick])
 
   // a fresh server render finished loading: it reflects lastSaved, so the
   // approximation only needs to cover edits made since then (usually none)
@@ -205,8 +359,20 @@ export function EditPanel({
       </div>
       {GROUPS.map((g) => (
         <div key={g.title} className="px-4 py-2 border-b border-base-300/30 last:border-0">
-          <h3 className="text-xs font-bold opacity-60 uppercase tracking-wide mb-1">{g.title}</h3>
-          {g.sliders.map((s) => {
+          <button
+            className="w-full flex items-center gap-1 text-xs font-bold opacity-60 uppercase tracking-wide mb-1 hover:opacity-100"
+            onClick={() => setFolded((f) => ({ ...f, [g.title]: !f[g.title] }))}
+          >
+            <ChevronRight
+              size={11}
+              className={`transition-transform ${folded[g.title] ? '' : 'rotate-90'}`}
+            />
+            {g.title}
+            {folded[g.title] && groupTouched(recipe, g) && (
+              <span className="badge badge-xs badge-primary ml-auto">•</span>
+            )}
+          </button>
+          {!folded[g.title] && g.sliders.map((s) => {
             const isTemp = s.label === 'Temp'
             const raw = getAt(recipe, s.path)
             const value = raw ?? s.def
@@ -261,6 +427,16 @@ export function EditPanel({
           })}
         </div>
       ))}
+
+      <DevelopExtras
+        imageId={imageId}
+        recipe={recipe}
+        onChanged={() => {
+          onRecipeChange()
+          setVersionTick((v) => v + 1)
+        }}
+        onProof={onProof}
+      />
       <p className="px-4 pb-3 text-[10px] opacity-40">
         Edits are non-destructive — stored in the .vibe.json sidecar, shared with agents.
       </p>

@@ -31,7 +31,13 @@ export function Brand() {
           {libraryPath ? libraryPath.split('/').filter(Boolean).pop() : 'choose folder…'}
         </span>
       </button>
-      {showPicker && <FolderPicker onSelect={openLibrary} onClose={() => setShowPicker(false)} />}
+      {showPicker && (
+        <FolderPicker
+          onSelect={openLibrary}
+          onClose={() => setShowPicker(false)}
+          current={libraryPath}
+        />
+      )}
     </div>
   )
 }
