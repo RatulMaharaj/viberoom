@@ -4,9 +4,10 @@ import { api } from '../api'
 import { useFolderChooser } from '../folderChooser'
 import { FolderPicker } from './FolderPicker'
 
-/** Logo with the current library folder underneath. Clicking the folder
- * opens the picker; changing folder reloads into the Catalog. */
-export function Brand() {
+/** Logo, optionally with the current library folder underneath. Clicking the
+ * folder opens the picker; changing folder reloads into the Catalog.
+ * Switching library is a Catalog-level action, so Develop hides it. */
+export function Brand({ showFolder = true }: { showFolder?: boolean }) {
   const [libraryPath, setLibraryPath] = useState<string | null>(null)
   const [showPicker, setShowPicker] = useState(false)
   const { available: nativePicker, choose } = useFolderChooser()
@@ -21,10 +22,11 @@ export function Brand() {
   }
 
   return (
-    <div className="flex flex-col items-start leading-tight shrink-0">
+    <div className="flex items-center gap-2 leading-tight shrink-0">
       <span className="font-bold text-lg">Viberoom</span>
+      {showFolder && (
       <button
-        className="flex items-center gap-1 text-xs opacity-70 hover:opacity-100"
+        className="flex items-center gap-1 text-xs opacity-70 hover:opacity-100 border-l border-base-content/20 pl-2"
         title={libraryPath ? `${libraryPath} — click to change folder` : 'Choose folder'}
         onClick={async () => {
           if (!nativePicker) return setShowPicker(true)
@@ -37,7 +39,8 @@ export function Brand() {
           {libraryPath ? libraryPath.split('/').filter(Boolean).pop() : 'choose folder…'}
         </span>
       </button>
-      {showPicker && (
+      )}
+      {showFolder && showPicker && (
         <FolderPicker
           onSelect={openLibrary}
           onClose={() => setShowPicker(false)}

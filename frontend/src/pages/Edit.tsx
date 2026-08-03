@@ -147,7 +147,7 @@ export function Edit() {
     <div className="h-full flex flex-col overflow-hidden">
       {!fullscreen && (
         <div className="navbar bg-base-200 gap-2 px-4 min-h-12">
-          <Brand />
+          <Brand showFolder={false} />
           <div className="flex-1" />
           {image && (
             <>
