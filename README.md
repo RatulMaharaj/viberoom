@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="desktop/icons-src/icon.png" width="96" alt="Viberoom" />
+  <img src="frontend/public/icon-source.png" width="96" alt="Viberoom" />
 </p>
 
 <h1 align="center">Viberoom</h1>
@@ -7,10 +7,9 @@
 <p align="center"><em>All the sliders — and an agent that can drive them.</em></p>
 
 Viberoom is a RAW photo manager and non-destructive editor you can drive
-**by hand or by agent**. Edit with the full develop UI in the browser (or
-desktop app) — or tell Claude Code *"reject the blurry ones, warm up the
-sunsets, export the picks"* and it happens through MCP, REST, or plain JSON
-sidecar files.
+**by hand or by agent**. Edit with the full develop UI in the browser — or tell
+Claude Code *"reject the blurry ones, warm up the sunsets, export the picks"*
+and it happens through MCP, REST, or plain JSON sidecar files.
 
 - 🧾 **Non-destructive, always.** Every edit is a readable `photo.CR3.vibe.json`
   next to the original. Delete the sidecar, get your pixels back.
@@ -38,7 +37,6 @@ sidecar files.
 | **Python** | 3.12+ | `pyproject.toml` floor; 3.13 is fine |
 | **Node** | 20.19+ or 22.12+ | what Vite 8 requires |
 | **[uv](https://docs.astral.sh/uv/)** | any recent | resolves and runs the backend |
-| **Rust** | stable, via `rustup` | *desktop app only* — skip for web |
 
 Nothing else. LibRaw and the image codecs arrive inside the `rawpy` and Pillow
 wheels, so there's no Homebrew/apt step and no compiler needed for the web app.
@@ -68,13 +66,7 @@ Other ways to run:
 
 ```bash
 uv run dev             # hacking: backend --reload + Vite (:7666 "ROOM" → :8423 "VIBE")
-uv run dev-desktop     # the desktop app, dev mode
-uv run build-desktop   # installers: .dmg / .msi / .AppImage — see desktop/README.md
 ```
-
-The desktop build additionally needs Rust, and on Linux
-`libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf` —
-see [desktop/README.md](desktop/README.md).
 
 If something's off: `npm run build` failing on syntax that looks fine usually
 means Node is below the Vite floor (`node -v`), and a `uv sync` that resolves

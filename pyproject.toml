@@ -27,8 +27,6 @@ viberoom = "viberoom:main"
 viberoom-mcp = "viberoom.mcp_server:main"
 viberoom-bench = "viberoom.bench.cli:main"
 dev = "viberoom.devtools:dev"
-dev-desktop = "viberoom.devtools:dev_desktop"
-build-desktop = "viberoom.devtools:build_desktop"
 
 [build-system]
 requires = ["hatchling"]

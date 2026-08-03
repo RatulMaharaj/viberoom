@@ -1,7 +1,0 @@
-node_modules/
-pyinstaller/build/
-pyinstaller/dist/
-src-tauri/target/
-src-tauri/binaries/
-src-tauri/gen/
-.DS_Store
