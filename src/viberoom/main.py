@@ -4,13 +4,22 @@ and the MCP server alike."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
@@ -20,7 +29,7 @@ from viberoom import presets as preset_store
 from viberoom import state
 from viberoom.catalog.scanner import scan
 from viberoom.config import Library, load_last_library, save_last_library
-from viberoom.engine.cache import render_preview
+from viberoom.engine.cache import preview_cache_key, render_preview
 from viberoom.engine.decode import extract_thumbnail
 from viberoom.export import ExportFormat, default_extension, export_image as export_file
 from viberoom.recipe.merge import deep_merge
@@ -1215,23 +1224,54 @@ def _recipe_for_variant(sc: Sidecar, variant: str | None) -> Recipe:
 
 # ---------- previews ----------
 
+#: Rendered imagery is addressed by a key that already covers the file mtime,
+#: the recipe and the pipeline version, so a given URL+ETag pair can never
+#: describe different pixels. That makes the response genuinely immutable and
+#: lets the browser skip revalidation entirely for a year.
+_IMMUTABLE = "private, max-age=31536000, immutable"
+
+
+def _image_response(request: Request, data: bytes, etag_key: str, **headers: str) -> Response:
+    """JPEG response with an ETag, answering 304 when the client already has it.
+
+    Without this every navigation re-downloaded all 500 grid thumbnails: the
+    bytes were disk-cached server-side but nothing told the browser it could
+    reuse what it already had.
+    """
+    etag = f'"{hashlib.sha1(etag_key.encode()).hexdigest()}"'
+    common = {"ETag": etag, "Cache-Control": _IMMUTABLE, **headers}
+
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=common)
+    return Response(content=data, media_type="image/jpeg", headers=common)
+
+
 @api.get("/images/{image_id}/thumbnail")
-def thumbnail(image_id: str) -> Response:
+def thumbnail(image_id: str, request: Request) -> Response:
     lib = state.require_library()
     path = _image_path(image_id)
-    key = f"thumb-{image_id}-{path.stat().st_mtime}"
+    key = f"thumb-{image_id}-{path.stat().st_mtime_ns}"
     cached = lib.cache_dir / f"{key}.jpg"
+
+    # Answer the conditional request before touching the disk at all — a warm
+    # grid then costs one stat() per image instead of a JPEG read and resend.
+    if request.headers.get("if-none-match"):
+        probe = _image_response(request, b"", key)
+        if probe.status_code == 304:
+            return probe
+
     if cached.exists():
         data = cached.read_bytes()
     else:
         data = extract_thumbnail(path)
         cached.write_bytes(data)
-    return Response(content=data, media_type="image/jpeg")
+    return _image_response(request, data, key)
 
 
 @api.get("/images/{image_id}/preview")
 def preview(
     image_id: str,
+    request: Request,
     size: Annotated[int, Query(ge=256, le=4096)] = 1600,
     original: bool = False,
     nocrop: bool = False,
@@ -1246,13 +1286,24 @@ def preview(
     if nocrop:
         recipe = recipe.model_copy(deep=True)
         recipe.geometry.crop = Crop()
+
+    # The disk cache key already hashes path, mtime, recipe and pipeline
+    # version — exactly the identity an ETag needs — so reuse it rather than
+    # inventing a second, subtly different one.
+    key = preview_cache_key(path, recipe, size)
+    if request.headers.get("if-none-match"):
+        probe = _image_response(request, b"", key)
+        if probe.status_code == 304:
+            return probe
+
     data = render_preview(path, recipe, size, lib.cache_dir)
-    return Response(content=data, media_type="image/jpeg")
+    return _image_response(request, data, key, **{"X-Recipe-Hash": key})
 
 
 @api.get("/images/{image_id}/proof")
 def soft_proof(
     image_id: str,
+    request: Request,
     space: Literal["display-p3", "adobe-rgb", "prophoto"] = "display-p3",
     warn: bool = False,
     size: Annotated[int, Query(ge=256, le=4096)] = 1600,
@@ -1263,25 +1314,54 @@ def soft_proof(
     targets rarely clip; the endpoint exists for the day decode goes wide.)"""
     import io as _io
 
+    import numpy as np
+
     from viberoom.color_mgmt import convert_from_srgb
     from viberoom.engine.cache import _decode_cache
     from viberoom.engine.pipeline import render_float
 
+    lib = state.require_library()
     path = _image_path(image_id)
+    recipe = load_sidecar(path).recipe
+
+    # Proofing was the one preview endpoint with no disk cache, so every poll
+    # of the same unchanged image paid for a full render plus a colour-space
+    # conversion. The space and warn flags are part of the identity here.
+    key = preview_cache_key(path, recipe, size) + f"|proof|{space}|{warn}"
+    digest = hashlib.sha1(key.encode()).hexdigest()
+    if request.headers.get("if-none-match"):
+        probe = _image_response(request, b"", key)
+        if probe.status_code == 304:
+            return probe
+
+    cached = lib.cache_dir / f"proof-{digest}.jpg"
+    meta = lib.cache_dir / f"proof-{digest}.oog"
+    if cached.exists() and meta.exists():
+        return _image_response(
+            request, cached.read_bytes(), key,
+            **{"X-Out-Of-Gamut-Percent": meta.read_text()},
+        )
+
     linear = _decode_cache.get(path, half_size=True)
-    rendered = render_float(linear, load_sidecar(path).recipe)
+    rendered = render_float(linear, recipe)
     proofed, oog = convert_from_srgb(rendered, space)
+    # Show the proofed pixels — the whole point of the endpoint. This
+    # previously encoded `rendered`, quietly returning the unproofed image.
+    out = proofed.copy() if warn else proofed
     if warn:
-        rendered = rendered.copy()
-        rendered[oog] = [1.0, 0.0, 1.0]
+        out[oog] = [1.0, 0.0, 1.0]
     from PIL import Image as PILImage
 
-    im = PILImage.fromarray((rendered * 255).round().astype("uint8"))
+    im = PILImage.fromarray((np.clip(out, 0, 1) * 255).round().astype("uint8"))
     im.thumbnail((size, size), PILImage.LANCZOS)
     buf = _io.BytesIO()
     im.save(buf, "JPEG", quality=90)
-    return Response(content=buf.getvalue(), media_type="image/jpeg",
-                    headers={"X-Out-Of-Gamut-Percent": f"{float(oog.mean()) * 100:.3f}"})
+    data = buf.getvalue()
+
+    percent = f"{float(oog.mean()) * 100:.3f}"
+    cached.write_bytes(data)
+    meta.write_text(percent)
+    return _image_response(request, data, key, **{"X-Out-Of-Gamut-Percent": percent})
 
 
 # ---------- ML: enhance (denoise / super-resolution) + faces ----------

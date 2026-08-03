@@ -34,9 +34,15 @@ from viberoom.engine.ops.tone import (
 from viberoom.recipe.schema import Recipe
 
 
-def render_float(linear: np.ndarray, recipe: Recipe) -> np.ndarray:
+def render_float(linear: np.ndarray, recipe: Recipe, scale: float = 1.0) -> np.ndarray:
     """Apply a recipe to a decoded linear image. Returns float32 sRGB HxWx3
-    in [0,1] (use for high-bit-depth export)."""
+    in [0,1] (use for high-bit-depth export).
+
+    `scale` says how large this frame is relative to the full-resolution one,
+    so ops whose radii are absolute pixel counts can compensate. Everything
+    else here sizes itself from the frame it is handed. Default 1.0 means
+    "this is the real thing", which is what export and the tests want.
+    """
     x = apply_lens(linear, recipe.lens)
     x = apply_white_balance(x, recipe.whiteBalance)
     x = apply_exposure(x, recipe.tone.exposure)
@@ -52,7 +58,7 @@ def render_float(linear: np.ndarray, recipe: Recipe) -> np.ndarray:
     if recipe.color.lut.stage == "post":
         x = apply_lut(x, recipe.color.lut)
     x = apply_presence(x, recipe.tone.texture, recipe.tone.clarity, recipe.tone.dehaze)
-    x = apply_detail(x, recipe.detail)
+    x = apply_detail(x, recipe.detail, scale)
 
     x = apply_geometry(x, recipe.geometry)
     x = apply_retouch(x, recipe.retouch)
@@ -62,6 +68,6 @@ def render_float(linear: np.ndarray, recipe: Recipe) -> np.ndarray:
     return np.clip(x, 0, 1).astype(np.float32)
 
 
-def render(linear: np.ndarray, recipe: Recipe) -> np.ndarray:
+def render(linear: np.ndarray, recipe: Recipe, scale: float = 1.0) -> np.ndarray:
     """Apply a recipe to a decoded linear image. Returns uint8 sRGB HxWx3."""
-    return (render_float(linear, recipe) * 255).round().astype(np.uint8)
+    return (render_float(linear, recipe, scale) * 255).round().astype(np.uint8)

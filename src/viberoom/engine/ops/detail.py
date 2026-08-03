@@ -22,8 +22,20 @@ def _blur(img: np.ndarray, sigma: float) -> np.ndarray:
     return out.astype(np.float32)
 
 
-def apply_detail(img: np.ndarray, detail: Detail) -> np.ndarray:
-    """Display-space [0,1]. NR first, then sharpening."""
+def apply_detail(img: np.ndarray, detail: Detail, scale: float = 1.0) -> np.ndarray:
+    """Display-space [0,1]. NR first, then sharpening.
+
+    `scale` is the ratio of this frame's size to the full-resolution frame the
+    recipe was authored against. Every other resolution-dependent op in the
+    pipeline states its radius as a fraction of `min(h, w)` and so rescales
+    itself; these radii are absolute pixel counts, so they need telling. A
+    1.2 px sharpening radius means something quite different on a 400 px
+    preview than on a 6000 px export, which is why previews have always been
+    a little crunchier than the file they promise.
+
+    Radii below ~0.3 px stop meaning anything, so heavily downscaled previews
+    simply skip the op rather than convolving with a degenerate kernel.
+    """
     out = img
     nr = detail.noiseReduction
     if nr.luminance or nr.color:
@@ -31,14 +43,18 @@ def apply_detail(img: np.ndarray, detail: Detail) -> np.ndarray:
         luma = out.mean(axis=-1, keepdims=True)
         chroma = out - luma
         if nr.luminance:
-            luma = _blur(luma[..., 0], 0.5 + nr.luminance / 100 * 2.0)[..., None]
+            sigma = (0.5 + nr.luminance / 100 * 2.0) * scale
+            if sigma >= 0.3:
+                luma = _blur(luma[..., 0], sigma)[..., None]
         if nr.color:
-            chroma = _blur(chroma, 0.5 + nr.color / 100 * 3.0)
+            sigma = (0.5 + nr.color / 100 * 3.0) * scale
+            if sigma >= 0.3:
+                chroma = _blur(chroma, sigma)
         out = np.clip(luma + chroma, 0, 1)
 
     sh = detail.sharpening
-    if sh.amount:
-        blurred = _blur(out, sh.radius)
+    if sh.amount and sh.radius * scale >= 0.3:
+        blurred = _blur(out, sh.radius * scale)
         high = out - blurred
         # `detail` damps flat areas: threshold the high-pass magnitude
         strength = sh.amount / 100 * (0.5 + sh.detail / 100)

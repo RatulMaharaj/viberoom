@@ -85,6 +85,19 @@ def test_soft_proof_endpoint(client):
     assert "x-out-of-gamut-percent" in {k.lower() for k in r.headers}
 
 
+def test_soft_proof_returns_proofed_pixels(client):
+    """The endpoint used to compute the proofed image and then encode the
+    unproofed one, so every space looked identical to the plain preview."""
+    c, _ = client
+    iid = _ids(c)[0]
+    # A wide-gamut target is the case where proofing actually moves pixels.
+    plain = c.get(f"/api/v1/images/{iid}/preview", params={"size": 256}).content
+    proofed = c.get(
+        f"/api/v1/images/{iid}/proof", params={"space": "prophoto", "size": 256}
+    ).content
+    assert proofed != plain
+
+
 # ---------- export extras (#19) ----------
 
 def test_watermark_text_changes_corner(client):

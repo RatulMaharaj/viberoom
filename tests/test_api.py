@@ -97,6 +97,46 @@ def test_preview_and_thumbnail(client):
     assert r.status_code == 200 and r.content[:2] == b"\xff\xd8"
 
 
+def test_preview_and_thumbnail_revalidate_with_etag(client):
+    """A second request carrying the ETag should get a bodyless 304."""
+    c, _ = client
+    iid = _first_id(c)
+
+    for url, params in (
+        (f"/api/v1/images/{iid}/thumbnail", {}),
+        (f"/api/v1/images/{iid}/preview", {"size": 256}),
+        (f"/api/v1/images/{iid}/proof", {"space": "display-p3"}),
+    ):
+        first = c.get(url, params=params)
+        assert first.status_code == 200
+        etag = first.headers["etag"]
+        assert "immutable" in first.headers["cache-control"]
+
+        again = c.get(url, params=params, headers={"If-None-Match": etag})
+        assert again.status_code == 304, url
+        assert not again.content
+        assert again.headers["etag"] == etag
+
+
+def test_preview_etag_changes_when_the_recipe_does(client):
+    """The ETag has to track the recipe, or edits would never become visible."""
+    c, _ = client
+    iid = _first_id(c)
+    before = c.get(f"/api/v1/images/{iid}/preview", params={"size": 256}).headers["etag"]
+
+    c.patch(f"/api/v1/images/{iid}/recipe", json={"tone": {"exposure": 1.25}})
+    after = c.get(f"/api/v1/images/{iid}/preview", params={"size": 256})
+
+    assert after.status_code == 200
+    assert after.headers["etag"] != before
+    # The stale validator must not satisfy the new request.
+    assert c.get(
+        f"/api/v1/images/{iid}/preview",
+        params={"size": 256},
+        headers={"If-None-Match": before},
+    ).status_code == 200
+
+
 def test_export(client):
     c, lib = client
     iid = _first_id(c)
