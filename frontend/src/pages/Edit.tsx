@@ -48,8 +48,31 @@ export function Edit() {
    *  beside the frame rather than inside SourceUrl: it is a fact about the
    *  request, not about the pixels. */
   const [localFrame, setLocalFrame] = useState<(SourceUrl & { asked: boolean }) | null>(null)
+  /** Something to look at while the real one is decoded.
+   *
+   *  A RAW is 0.6-9 seconds to decode, and switching images pays that every
+   *  time it is a photo the cache has not seen. The grid has already decoded
+   *  the camera's embedded preview for its tile, so showing that immediately
+   *  turns a multi-second blank into a soft image that sharpens. */
+  const [fastFrame, setFastFrame] = useState<SourceUrl | null>(null)
+
 
   const local = source?.kind === 'local'
+
+  useEffect(() => {
+    if (!local || !id) return
+    let stale = false
+    getSource()
+      .then((s) => s.thumbnail(id))
+      .then((f) => (stale ? f.release() : setFastFrame(f)))
+      .catch(() => {})
+    return () => {
+      stale = true
+    }
+  }, [local, id])
+
+  useEffect(() => () => fastFrame?.release(), [fastFrame])
+
 
   /** Slider state on its way to the GPU. A plain mutable box, not state — see
    *  gpu/live.ts for why that matters at pointer-move rates. */
@@ -284,7 +307,18 @@ export function Edit() {
             src made the browser resolve it to the page, fail, and draw its
             broken-image glyph with the filename underneath — a failure where
             the truth was "not yet". */}
-        {id && (!source || (local && !localFrame)) && (
+        {id && !source && <div className="absolute inset-0 m-8 skeleton rounded-box" />}
+        {/* Blurred on purpose: it is a thumbnail standing in for a photo, and
+            pretending otherwise would read as a bad render rather than a
+            pending one. */}
+        {id && source && local && !localFrame && fastFrame && (
+          <img
+            src={fastFrame.url}
+            alt=""
+            className="max-h-full max-w-full object-contain blur-sm opacity-80"
+          />
+        )}
+        {id && source && local && !localFrame && !fastFrame && (
           <div className="absolute inset-0 m-8 skeleton rounded-box" />
         )}
         {/* Not until the source is known. Rendering earlier meant falling
