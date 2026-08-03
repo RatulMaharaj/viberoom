@@ -24,19 +24,18 @@ directory = "./frontend/dist"
 # is what makes a deep link or a reload work.
 not_found_handling = "single-page-application"
 
-# Routing and cache headers are NOT here on purpose: they live in
-# frontend/public/_redirects and frontend/public/_headers, which Vite copies
-# into the build. Keeping them beside the app means they travel with it to any
-# host that speaks the same format, rather than being tied to this one.
+# SPA routing is `not_found_handling` above, not a _redirects rule. Shipping
+# both is an error, not merely redundant: Cloudflare serves index.html for the
+# unmatched path, then the catch-all rule matches that too, and it rejects the
+# deploy with "Infinite loop detected". A host that has no equivalent setting —
+# Netlify, say — wants `/*  /index.html  200` in frontend/public/_redirects.
 #
-# Two things they encode that are easy to get wrong:
+# Note what SPA routing means for the app: a request to /api/v1/... comes back
+# as a cheerful 200 of HTML rather than a 404, which is why the app checks for
+# JSON before believing it has a backend. Do not "simplify" that check.
 #
-#   * Every unmatched path serves index.html with a 200, so client-side routes
-#     work. That also means a request to /api/v1/... comes back as a cheerful
-#     200 of HTML rather than a 404 — which is why the app checks for JSON
-#     before believing it has a backend. Do not "simplify" that check.
-#
-#   * sw.js and index.html must never be cached, since they decide which
-#     version of everything else you get. The hashed assets and the 1.4 MB
-#     LibRaw WebAssembly binary cache for a year, because their names change
-#     when their contents do.
+# Cache headers do live beside the app, in frontend/public/_headers, so they
+# travel with it. sw.js and index.html must never be cached, since they decide
+# which version of everything else you get; the hashed assets and the 1.4 MB
+# LibRaw WebAssembly binary cache for a year, because their names change when
+# their contents do.
