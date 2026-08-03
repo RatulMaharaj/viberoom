@@ -88,7 +88,7 @@ into your own folder and its browser-local cache.
 - **Offline.** A service worker precaches the app shell, and the LibRaw wasm is
   cached the first time a RAW is decoded, so a second visit works with no
   network at all.
-- **Updates** ship by pushing to `main`: GitHub Actions rebuilds and deploys the
+- **Updates** ship by pushing to `main`: the host rebuilds and deploys the
   static site, and open tabs get a *"a new version of Viberoom is ready"*
   prompt instead of silently running last month's build.
 
