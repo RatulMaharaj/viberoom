@@ -117,6 +117,18 @@ class CatalogDB:
     def query(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         return self._conn().execute(sql, params).fetchall()
 
+    def executemany(self, sql: str, seq) -> None:
+        """Run one statement over many parameter tuples.
+
+        The batching counterpart to execute(): a scan upserting 50k rows one
+        call at a time spends its life in Python, not SQLite. Same commit rule
+        — autocommits unless already inside transaction().
+        """
+        conn = self._conn()
+        conn.executemany(sql, seq)
+        if not getattr(self._local, "in_txn", False):
+            conn.commit()
+
     @contextmanager
     def transaction(self):
         """Batch many writes into one commit — the difference between one fsync

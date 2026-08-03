@@ -288,3 +288,84 @@ def test_rowcount_survives_thread_local_cursors(client):
     ids = [im["id"] for im in c.get("/api/v1/images").json()["images"]][:2]
     leader = c.post("/api/v1/stacks", json={"image_ids": ids}).json()["leader"]
     assert c.request("DELETE", f"/api/v1/stacks/{leader}").json()["unstacked"] == 2
+
+
+def test_duplicate_clustering_matches_the_naive_pairwise_scan():
+    """The LSH/numpy clusterer must agree with comparing every pair by hand."""
+    import random
+
+    from viberoom.catalog.stacks import _cluster_hashes
+
+    rng = random.Random(11)
+    hashes = []
+    for i in range(400):
+        if hashes and rng.random() < 0.1:  # seed near-duplicates around the threshold
+            v = int(hashes[rng.randrange(len(hashes))][1], 16)
+            for _ in range(rng.randrange(0, 8)):
+                v ^= 1 << rng.randrange(64)
+        else:
+            v = rng.getrandbits(64)
+        hashes.append((f"id{i:04d}", f"{v:016x}"))
+
+    def reference(threshold):
+        parent = {iid: iid for iid, _ in hashes}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for i, (id_a, ha) in enumerate(hashes):
+            for id_b, hb in hashes[i + 1:]:
+                if bin(int(ha, 16) ^ int(hb, 16)).count("1") <= threshold:
+                    parent[find(id_b)] = find(id_a)
+        groups = {}
+        for iid, _ in hashes:
+            groups.setdefault(find(iid), []).append(iid)
+        return sorted(sorted(g) for g in groups.values() if len(g) > 1)
+
+    for threshold in (0, 1, 5, 7, 10):  # 8+ leaves the pigeonhole regime
+        assert _cluster_hashes(hashes, threshold) == reference(threshold)
+    assert _cluster_hashes(hashes[:1], 5) == []
+
+
+def test_batched_metadata_matches_per_file_reads(tmp_path):
+    from viberoom.catalog import metadata
+
+    _make_jpegs(tmp_path, ["x.jpg", "y.jpg"])
+    paths = [tmp_path / "x.jpg", tmp_path / "y.jpg"]
+    assert metadata.read_metadata_batch(paths) == {p: metadata.read_metadata(p) for p in paths}
+
+
+def test_metadata_falls_back_when_exiftool_fails(tmp_path, monkeypatch):
+    """A broken/missing exiftool must not cost us exifread+Pillow results."""
+    from viberoom.catalog import metadata
+
+    _make_jpegs(tmp_path, ["z.jpg"])
+    p = tmp_path / "z.jpg"
+    monkeypatch.setattr(metadata, "_EXIFTOOL", str(tmp_path / "no-such-exiftool"))
+    w, h, _ = metadata.read_metadata_batch([p])[p]
+    with Image.open(p) as im:
+        assert (w, h) == im.size
+
+
+def test_scan_counts_survive_batched_writes(tmp_path):
+    """Batching the upserts must not disturb added/updated/removed or the
+    mtime-based warm-rescan skip."""
+    from viberoom.catalog.db import CatalogDB
+    from viberoom.catalog.scanner import scan
+    from viberoom.config import Library
+
+    lib_root = tmp_path / "lib"
+    _make_jpegs(lib_root, [f"i{i}.jpg" for i in range(12)])
+    db = CatalogDB(tmp_path / "catalog.db")
+    library = Library(root=lib_root)
+    assert scan(library, db) == {"total": 12, "added": 12, "updated": 0, "removed": 0}
+    assert scan(library, db) == {"total": 12, "added": 0, "updated": 0, "removed": 0}
+    (lib_root / "i0.jpg").unlink()
+    _make_jpegs(lib_root, ["new.jpg"], seed=99)
+    assert scan(library, db) == {"total": 12, "added": 1, "updated": 0, "removed": 1}
+    assert scan(library, db, full=True)["updated"] == 12
+    assert len(db.query("SELECT id FROM images")) == 12
+    db.close()

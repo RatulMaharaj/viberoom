@@ -66,15 +66,18 @@ def auto_stack(db: CatalogDB, gap_seconds: float = 2.0, raw_jpeg: bool = True) -
     groups: dict[str, list[str]] = {}
     for r in rows:
         groups.setdefault(find(r["id"]), []).append(r["id"])
-    db.execute("UPDATE images SET stack_id = NULL")
     stacks = []
+    assignments: list[tuple[str, str]] = []
     for members in groups.values():
         if len(members) < 2:
             continue
         leader = members[0]
-        for iid in members:
-            db.execute("UPDATE images SET stack_id=? WHERE id=?", (leader, iid))
+        assignments += [(leader, iid) for iid in members]
         stacks.append({"leader": leader, "members": members})
+    # the clear plus every member in one commit, not one per member
+    with db.transaction() as tx:
+        tx.execute("UPDATE images SET stack_id = NULL")
+        tx.executemany("UPDATE images SET stack_id=? WHERE id=?", assignments)
     return {"stacks": len(stacks), "stacked_images": sum(len(s["members"]) for s in stacks),
             "groups": stacks}
 
@@ -82,8 +85,10 @@ def auto_stack(db: CatalogDB, gap_seconds: float = 2.0, raw_jpeg: bool = True) -
 def set_stack(db: CatalogDB, image_ids: list[str]) -> dict:
     """Manually stack images; the first id becomes the leader."""
     leader = image_ids[0]
-    for iid in image_ids:
-        db.execute("UPDATE images SET stack_id=? WHERE id=?", (leader, iid))
+    with db.transaction() as tx:
+        tx.executemany(
+            "UPDATE images SET stack_id=? WHERE id=?", [(leader, i) for i in image_ids]
+        )
     return {"leader": leader, "members": image_ids}
 
 
@@ -104,6 +109,75 @@ def _hamming(a: str, b: str) -> int:
     return bin(int(a, 16) ^ int(b, 16)).count("1")
 
 
+_POPCOUNT = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
+
+
+def _popcount64(x: np.ndarray) -> np.ndarray:
+    """Set bits per uint64, via a byte lookup table (numpy has no popcount)."""
+    return _POPCOUNT[x.view(np.uint8).reshape(*x.shape, 8)].sum(axis=-1)
+
+
+def _band_buckets(vals: np.ndarray, threshold: int) -> list[np.ndarray]:
+    """Candidate groups that must contain every pair within `threshold` bits.
+
+    Pigeonhole: split the 64 bits into 8 byte-wide bands; a pair differing in
+    at most `threshold` bits can disturb at most that many bands, so with
+    threshold < 8 the pair agrees exactly on some band and lands in a shared
+    bucket. Past that the guarantee is gone and we fall back to one bucket
+    holding everything (still vectorized, just O(n^2) comparisons)."""
+    if threshold >= 8:
+        return [np.arange(len(vals))]
+    byte_view = vals.view(np.uint8).reshape(len(vals), 8)
+    buckets = []
+    for band in range(8):
+        col = byte_view[:, band]
+        order = np.argsort(col, kind="stable")
+        starts = np.flatnonzero(np.diff(col[order])) + 1
+        buckets += [b for b in np.split(order, starts) if len(b) > 1]
+    return buckets
+
+
+def _cluster_hashes(hashes: list[tuple[str, str]], threshold: int) -> list[list[str]]:
+    """Connected components of the "dHash within `threshold` bits" graph.
+
+    Same result as comparing every pair, without the ~n^2/2 Python hex parses:
+    each hash is parsed to a uint64 once and the comparisons run in numpy over
+    LSH candidate buckets."""
+    ids = [iid for iid, _ in hashes]
+    n = len(ids)
+    if n < 2:
+        return []
+    vals = np.array([int(h, 16) for _, h in hashes], dtype=np.uint64)
+
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for bucket in _band_buckets(vals, threshold):
+        bvals = vals[bucket]
+        # rows in slices so a pathological bucket cannot blow up memory
+        for start in range(0, len(bucket), 256):
+            rows = bucket[start:start + 256]
+            dist = _popcount64(vals[rows][:, None] ^ bvals[None, :])
+            # upper triangle only: each unordered pair needs one union
+            hit_r, hit_c = np.nonzero(
+                (dist <= threshold) & (rows[:, None] < bucket[None, :])
+            )
+            for a, b in zip(rows[hit_r], bucket[hit_c]):
+                ra, rb = find(int(a)), find(int(b))
+                if ra != rb:
+                    parent[rb] = ra
+
+    groups: dict[int, list[str]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(ids[i])
+    return sorted(sorted(g) for g in groups.values() if len(g) > 1)
+
+
 def find_duplicates(db: CatalogDB, library: Library, threshold: int = 5) -> dict:
     """Group visually near-identical images (dHash hamming <= threshold).
     Hashes are computed from cached thumbnails and stored in the DB."""
@@ -111,6 +185,7 @@ def find_duplicates(db: CatalogDB, library: Library, threshold: int = 5) -> dict
 
     rows = db.query("SELECT id, rel_path, dhash, mtime FROM images")
     hashes: list[tuple[str, str]] = []
+    fresh: list[tuple[str, str]] = []
     for r in rows:
         h = r["dhash"]
         if not h:
@@ -118,24 +193,12 @@ def find_duplicates(db: CatalogDB, library: Library, threshold: int = 5) -> dict
                 h = dhash_bits(extract_thumbnail(library.root / r["rel_path"]))
             except Exception:
                 continue
-            db.execute("UPDATE images SET dhash=? WHERE id=?", (h, r["id"]))
+            fresh.append((h, r["id"]))
         hashes.append((r["id"], h))
+    if fresh:
+        # one commit for the whole backfill instead of one per thumbnail
+        with db.transaction() as tx:
+            tx.executemany("UPDATE images SET dhash=? WHERE id=?", fresh)
 
-    parent = {iid: iid for iid, _ in hashes}
-
-    def find(x: str) -> str:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    for i, (id_a, ha) in enumerate(hashes):
-        for id_b, hb in hashes[i + 1:]:
-            if _hamming(ha, hb) <= threshold:
-                parent[find(id_b)] = find(id_a)
-
-    groups: dict[str, list[str]] = {}
-    for iid, _ in hashes:
-        groups.setdefault(find(iid), []).append(iid)
-    dupes = [sorted(g) for g in groups.values() if len(g) > 1]
-    return {"groups": sorted(dupes), "images_affected": sum(len(g) for g in dupes)}
+    dupes = _cluster_hashes(hashes, threshold)
+    return {"groups": dupes, "images_affected": sum(len(g) for g in dupes)}
