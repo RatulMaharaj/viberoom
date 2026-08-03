@@ -192,9 +192,11 @@ export class GpuRenderer {
       antialias: false,
       depth: false,
       stencil: false,
-      // The canvas is read back for the capability smoke test and is otherwise
-      // only ever composited, so the browser may drop the buffer after a swap.
-      preserveDrawingBuffer: false,
+      // Keep the drawn pixels. The canvas is hidden with display:none whenever
+      // the server's frame is the one on screen, and a buffer drawn while
+      // hidden may never be composited — so letting the browser drop it meant
+      // the canvas came back empty for a frame on the next edit.
+      preserveDrawingBuffer: true,
       powerPreference: 'high-performance',
     })
     if (!gl) throw new GpuUnavailable('no webgl2 context')

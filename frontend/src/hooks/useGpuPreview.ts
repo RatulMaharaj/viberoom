@@ -148,6 +148,10 @@ export function useGpuPreview({ imageId, size, live, enabled, commitTick }: Opti
   // release the last blob URL on unmount
   useEffect(() => () => serverFrame?.revoke(), [serverFrame])
 
+  // Opt-in tracing for the preview swap; see the transition log below.
+  const debugPreview = typeof window !== 'undefined'
+    && new URLSearchParams(window.location.search).has('debug')
+
   // ---- the render loop ----
   useEffect(() => {
     if (!active || !ready) {
@@ -157,10 +161,26 @@ export function useGpuPreview({ imageId, size, live, enabled, commitTick }: Opti
     let raf = 0
     let drawnVersion = -1
     let current: PreviewMode = 'off'
+    let redrawOnShow = false
     const to = (next: PreviewMode) => {
       // setState only on a real transition: this runs 60 times a second and a
       // redundant update would re-render the whole develop panel each frame.
       if (next !== current) {
+        // Coming back from hidden: draw again on the following frame, once the
+        // canvas is really in the layout. Belt and braces alongside
+        // preserveDrawingBuffer — between them the canvas is never composited
+        // empty, which is what made every edit flash.
+        if (next === 'gpu') redrawOnShow = true
+        // `?debug=1` traces the swaps. A flash lasts a frame or two, which is
+        // far too quick to attribute by eye, and the mode it passes through
+        // says which of several very different bugs it actually is.
+        if (debugPreview) {
+          console.log(`[preview] ${current} -> ${next}`, {
+            t: Math.round(performance.now()),
+            ready,
+            hasServerFrame: Boolean(serverFrame),
+          })
+        }
         current = next
         setMode(next)
       }
@@ -179,7 +199,11 @@ export function useGpuPreview({ imageId, size, live, enabled, commitTick }: Opti
         return
       }
       to('gpu')
-      if (live.version !== drawnVersion) {
+      if (live.version !== drawnVersion || redrawOnShow) {
+        // `redrawOnShow` survives one extra frame on purpose: the draw that
+        // accompanies the mode change happens before React has put the canvas
+        // back in the layout, so it is the frame *after* that has to land.
+        redrawOnShow = current !== 'gpu'
         drawnVersion = live.version
         renderer.render(recipe)
       }
