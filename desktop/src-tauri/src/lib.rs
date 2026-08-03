@@ -47,6 +47,7 @@ pub fn run() {
                 .sidecar("viberoom-backend")
                 .expect("sidecar binary missing — run desktop/build-backend.sh first")
                 .env("VIBEROOM_PORT", port.to_string())
+                .env("VIBEROOM_SIDECAR", "1")
                 .spawn()
                 .expect("failed to spawn viberoom backend");
             *app.state::<Backend>().0.lock().unwrap() = Some(child);

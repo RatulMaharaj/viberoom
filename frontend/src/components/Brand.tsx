@@ -20,7 +20,10 @@ export function Brand() {
 
   return (
     <div className="flex flex-col items-start leading-tight shrink-0">
-      <span className="font-bold text-lg">Viberoom</span>
+      <span className="flex items-center gap-1.5">
+        <img src="/favicon.png" alt="" className="w-5 h-5" />
+        <span className="font-brand font-bold text-lg tracking-tight">Viberoom</span>
+      </span>
       <button
         className="flex items-center gap-1 text-xs opacity-70 hover:opacity-100"
         title={libraryPath ? `${libraryPath} — click to change folder` : 'Choose folder'}

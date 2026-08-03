@@ -118,7 +118,7 @@ export function Library() {
     return (
       <div className="hero min-h-screen">
         <div className="hero-content flex-col">
-          <h1 className="text-4xl font-bold">Viberoom</h1>
+          <h1 className="font-brand text-4xl font-bold tracking-tight">Viberoom</h1>
           <p className="opacity-70">Point at a local folder of photos to get started.</p>
           <div className="join w-full max-w-xl">
             <input

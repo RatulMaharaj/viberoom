@@ -1,4 +1,16 @@
 @import "tailwindcss";
+
+/* Brand font: Space Grotesk (variable, OFL) — headings, wordmark, big numbers */
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("/fonts/SpaceGrotesk.woff2") format("woff2");
+  font-weight: 300 700;
+  font-display: swap;
+}
+
+@theme {
+  --font-brand: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+}
 @plugin "daisyui" {
   themes: false;
 }
@@ -15,12 +27,12 @@
   --color-base-300: #595959; /* image canvas: 35% grey */
   --color-base-content: #dedede;
 
-  --color-primary: #78a4d4; /* LR-ish muted selection blue */
-  --color-primary-content: #14181d;
+  --color-primary: #f5f5f5; /* paper white — selection, active states */
+  --color-primary-content: #0a0a0a;
   --color-secondary: #8e8e8e;
   --color-secondary-content: #1a1a1a;
-  --color-accent: #b6c8da;
-  --color-accent-content: #14181d;
+  --color-accent: #bfbfbf; /* light gray for secondary emphasis */
+  --color-accent-content: #0a0a0a;
   --color-neutral: #262626;
   --color-neutral-content: #d6d6d6;
 
