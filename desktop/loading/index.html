@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Viberoom</title>
+    <style>
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: flex; align-items: center; justify-content: center;
+        flex-direction: column; gap: 1rem;
+        background: #17181c; color: #e8e8ea;
+        font-family: system-ui, sans-serif;
+      }
+      .spinner {
+        width: 28px; height: 28px; border-radius: 50%;
+        border: 3px solid #3a3c44; border-top-color: #e8e8ea;
+        animation: spin 0.9s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .error { display: none; color: #f87171; }
+      body.failed .spinner, body.failed .starting { display: none; }
+      body.failed .error { display: block; }
+    </style>
+  </head>
+  <body>
+    <div class="spinner"></div>
+    <p class="starting">Starting Viberoom…</p>
+    <p class="error">The Viberoom backend failed to start. Please relaunch the app.</p>
+  </body>
+</html>

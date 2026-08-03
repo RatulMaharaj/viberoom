@@ -1,0 +1,14 @@
+{
+  "name": "viberoom-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "backend": "bash build-backend.sh",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icon": "tauri icon icons-src/icon.png"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}
