@@ -38,7 +38,10 @@ def _clamped_patch(center_x: float, center_y: float, half: int, h: int, w: int):
 def apply_retouch(img: np.ndarray, spots: list[RetouchSpot]) -> np.ndarray:
     if not spots:
         return img
-    out = np.clip(img, 0, 1).copy()
+    # np.clip already hands back a fresh writable array; the .copy() that used
+    # to follow it was a second full frame for nothing. Everything below is
+    # already patch-local, so this is the op's only frame-sized allocation.
+    out = np.clip(img, 0, 1)
     h, w = out.shape[:2]
     for spot in spots:
         r_px = spot.radius * min(h, w)

@@ -15,9 +15,15 @@ _HUE_CENTERS = {
 _BAND_WIDTH = 45.0  # degrees of influence falloff on each side
 
 
-def apply_white_balance(img: np.ndarray, wb: WhiteBalance) -> np.ndarray:
+def apply_white_balance(
+    img: np.ndarray, wb: WhiteBalance, out: np.ndarray | None = None
+) -> np.ndarray:
     """Temp/tint as RGB channel gains relative to the as-shot baseline
-    (5500K neutral). A pragmatic approximation, not a colorimetric CCT model."""
+    (5500K neutral). A pragmatic approximation, not a colorimetric CCT model.
+
+    Purely pointwise, so `out` may be `img` itself — but only when the caller
+    owns that buffer; see `pipeline._owned`.
+    """
     if wb.temp is None and wb.tint == 0:
         return img
     r = g = b = 1.0
@@ -29,38 +35,58 @@ def apply_white_balance(img: np.ndarray, wb: WhiteBalance) -> np.ndarray:
     if wb.tint:
         # positive = magenta (cut G), negative = green (boost G)
         g *= 2.0 ** (-wb.tint / 150.0 * 0.3)
-    return img * np.array([r, g, b], dtype=np.float32)
+    return np.multiply(img, np.array([r, g, b], dtype=np.float32), out=out)
 
 
 def _rgb_to_hsv(img: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     r, g, b = img[..., 0], img[..., 1], img[..., 2]
-    maxc = np.max(img, axis=-1)
-    minc = np.min(img, axis=-1)
+    # Pairwise maximums rather than np.max(axis=-1): reducing over the
+    # length-3 fastest-varying axis defeats numpy's inner loop and measures
+    # ~15x slower than two full-frame elementwise passes.
+    maxc = np.maximum(np.maximum(r, g), b)
+    minc = np.minimum(np.minimum(r, g), b)
     v = maxc
     delta = maxc - minc
     s = np.where(maxc > 0, delta / np.maximum(maxc, 1e-8), 0)
-    h = np.zeros_like(maxc)
-    mask = delta > 1e-8
-    rc = np.where(mask, (maxc - r) / np.maximum(delta, 1e-8), 0)
-    gc = np.where(mask, (maxc - g) / np.maximum(delta, 1e-8), 0)
-    bc = np.where(mask, (maxc - b) / np.maximum(delta, 1e-8), 0)
-    h = np.where((maxc == r) & mask, bc - gc, h)
-    h = np.where((maxc == g) & mask, 2.0 + rc - bc, h)
-    h = np.where((maxc == b) & mask, 4.0 + gc - rc, h)
-    h = (h / 6.0) % 1.0
+    dsafe = np.maximum(delta, 1e-8)
+    # rc/gc/bc are left unmasked: below the epsilon every numerator is smaller
+    # than the clamped denominator, so they stay bounded, and the hue of an
+    # achromatic pixel is zeroed outright further down.
+    rc = maxc - r
+    rc /= dsafe
+    gc = maxc - g
+    gc /= dsafe
+    bc = maxc - b
+    bc /= dsafe
+    h = np.where(maxc == g, 2.0 + rc - bc, bc - gc)
+    h = np.where(maxc == b, 4.0 + gc - rc, h)
+    h *= delta > 1e-8
+    h /= 6.0
+    h %= 1.0
     return h, s, v
 
 
+#: Which of (v, q, p, t) each of R, G, B takes in each of the six hue sectors.
+_SECTOR_COMPONENT = ((0, 1, 2, 2, 3, 0), (3, 0, 0, 1, 2, 2), (2, 2, 3, 0, 0, 1))
+
+
 def _hsv_to_rgb(h: np.ndarray, s: np.ndarray, v: np.ndarray) -> np.ndarray:
-    i = (h * 6.0).astype(np.int32) % 6
-    f = h * 6.0 - np.floor(h * 6.0)
+    h6 = h * 6.0
+    i = h6.astype(np.int32) % 6
+    f = h6 - np.floor(h6)
     p = v * (1 - s)
     q = v * (1 - s * f)
     t = v * (1 - s * (1 - f))
-    r = np.choose(i, [v, q, p, p, t, v])
-    g = np.choose(i, [t, v, v, q, p, p])
-    b = np.choose(i, [p, p, t, v, v, q])
-    return np.stack([r, g, b], axis=-1).astype(np.float32)
+    comps = (v, q, p, t)
+    out = np.empty(np.shape(h) + (3,), dtype=np.float32)
+    # np.choose builds a broadcast of all six candidate frames per channel and
+    # costs about four times what this cascade of selections does.
+    for c, table in enumerate(_SECTOR_COMPONENT):
+        chan = comps[table[5]]
+        for k in range(5):
+            chan = np.where(i == k, comps[table[k]], chan)
+        out[..., c] = chan
+    return out
 
 
 def apply_color(img: np.ndarray, color: Color) -> np.ndarray:
@@ -132,7 +158,8 @@ def apply_color_grading(img: np.ndarray, grading: ColorGrading) -> np.ndarray:
                 np.array(band.hue / 360.0), np.array(1.0), np.array(1.0)
             ).astype(np.float32)
             offset = tint - tint.mean()  # chroma only: zero net brightness
-            x = x + w[..., None] * (band.saturation / 100 * 0.35) * offset
+            # x is our own clipped copy, so the bands accumulate in place
+            x += w[..., None] * (band.saturation / 100 * 0.35) * offset
         if band.luminance:
-            x = x * (1.0 + w[..., None] * band.luminance / 100 * 0.4)
-    return np.clip(x, 0, 1)
+            x *= 1.0 + w[..., None] * band.luminance / 100 * 0.4
+    return np.clip(x, 0, 1, out=x)

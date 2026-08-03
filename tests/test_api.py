@@ -97,6 +97,46 @@ def test_preview_and_thumbnail(client):
     assert r.status_code == 200 and r.content[:2] == b"\xff\xd8"
 
 
+def test_preview_and_thumbnail_revalidate_with_etag(client):
+    """A second request carrying the ETag should get a bodyless 304."""
+    c, _ = client
+    iid = _first_id(c)
+
+    for url, params in (
+        (f"/api/v1/images/{iid}/thumbnail", {}),
+        (f"/api/v1/images/{iid}/preview", {"size": 256}),
+        (f"/api/v1/images/{iid}/proof", {"space": "display-p3"}),
+    ):
+        first = c.get(url, params=params)
+        assert first.status_code == 200
+        etag = first.headers["etag"]
+        assert "immutable" in first.headers["cache-control"]
+
+        again = c.get(url, params=params, headers={"If-None-Match": etag})
+        assert again.status_code == 304, url
+        assert not again.content
+        assert again.headers["etag"] == etag
+
+
+def test_preview_etag_changes_when_the_recipe_does(client):
+    """The ETag has to track the recipe, or edits would never become visible."""
+    c, _ = client
+    iid = _first_id(c)
+    before = c.get(f"/api/v1/images/{iid}/preview", params={"size": 256}).headers["etag"]
+
+    c.patch(f"/api/v1/images/{iid}/recipe", json={"tone": {"exposure": 1.25}})
+    after = c.get(f"/api/v1/images/{iid}/preview", params={"size": 256})
+
+    assert after.status_code == 200
+    assert after.headers["etag"] != before
+    # The stale validator must not satisfy the new request.
+    assert c.get(
+        f"/api/v1/images/{iid}/preview",
+        params={"size": 256},
+        headers={"If-None-Match": before},
+    ).status_code == 200
+
+
 def test_export(client):
     c, lib = client
     iid = _first_id(c)
@@ -112,3 +152,64 @@ def test_recipe_schema_served(client):
     c, _ = client
     schema = c.get("/api/v1/recipe/schema").json()
     assert "whiteBalance" in schema["properties"]
+
+
+def test_list_omits_exif_blob_but_keeps_the_caption_fields(client):
+    """The grid ships a summary EXIF dict built from the denormalized columns;
+    the multi-KB blob only travels on the detail endpoint."""
+    from viberoom import state
+
+    c, _ = client
+    iid = _first_id(c)
+    blob = {"Model": "X-T5", "LensModel": "XF 35mmF1.4 R", "ISO": "400",
+            "FocalLength": "35", "MakerNote": "m" * 5000}
+    state.db().execute(
+        "UPDATE images SET exif_json=?, camera=?, lens=?, iso=?, focal_length=?,"
+        " taken_at=? WHERE id=?",
+        (json.dumps(blob), "X-T5", "XF 35mmF1.4 R", 400, 35.0, "2024-01-02 03:04:05", iid),
+    )
+    row = next(im for im in c.get("/api/v1/images").json()["images"] if im["id"] == iid)
+    assert "MakerNote" not in row["exif"]
+    assert row["exif"]["Model"] == "X-T5" and row["exif"]["LensModel"] == "XF 35mmF1.4 R"
+    assert row["exif"]["ISO"] == "400" and row["exif"]["FocalLength"] == "35.0"
+    # shape the UI relies on is otherwise unchanged
+    assert row["keywords"] == [] and row["faces"] is None
+    assert row["camera"] == "X-T5" and row["iso"] == 400 and row["is_raw"] is False
+    detail = c.get(f"/api/v1/images/{iid}").json()
+    assert detail["exif"]["MakerNote"] == "m" * 5000
+
+
+def test_batch_path_resolver(client):
+    from viberoom.main import _image_paths
+
+    c, lib = client
+    ids = [im["id"] for im in c.get("/api/v1/images").json()["images"]]
+    paths = _image_paths(ids + ["nope"])
+    assert set(paths) == set(ids)
+    assert all(p.parent == lib for p in paths.values())
+    # unknown ids in a batch still 404 rather than being silently skipped
+    assert c.post("/api/v1/stacks", json={"image_ids": [ids[0], "nope"]}).status_code == 404
+
+
+def test_list_exif_carries_every_field_the_caption_needs(client):
+    """The grid caption is "f/2.8 · 1/250s · ISO 400 · 35mm". Dropping exif_json
+    from list rows silently cost the first two until aperture and shutter were
+    denormalized alongside iso and focal length."""
+    from viberoom import state
+
+    c, _ = client
+    iid = _first_id(c)
+    state.db().execute(
+        "UPDATE images SET exif_json=?, camera=?, lens=?, iso=?, focal_length=?,"
+        " aperture=?, shutter=? WHERE id=?",
+        (json.dumps({"MakerNote": "m" * 5000}), "X-T5", "XF 35mmF1.4 R", 400, 35.0,
+         2.8, 0.004, iid),
+    )
+    row = next(im for im in c.get("/api/v1/images").json()["images"] if im["id"] == iid)
+
+    # exactly the keys frontend/src/exif.ts reads
+    assert row["exif"]["FNumber"] == "2.8"
+    assert row["exif"]["ExposureTime"] == "0.004"
+    assert row["exif"]["ISO"] == "400"
+    assert row["exif"]["FocalLength"] == "35.0"
+    assert "MakerNote" not in row["exif"]

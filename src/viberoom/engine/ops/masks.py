@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from viberoom.engine.ops.blur import fast_blur
+from viberoom.engine.ops.blur import box_radius, fast_blur
 from viberoom.engine.ops.presence import apply_clarity, apply_dehaze
 from viberoom.engine.ops.tone import apply_contrast, apply_regions
 from viberoom.recipe.schema import (
@@ -62,9 +62,11 @@ def _dist_to_polyline(xx: np.ndarray, yy: np.ndarray, pts_px: list[tuple[float, 
     return d
 
 
-def stroke_weight(stroke: BrushStroke, h: int, w: int) -> np.ndarray:
-    """Rasterize one stroke to an HxW weight map, computed only inside the
-    stroke's bounding box for speed."""
+def _stroke_patch(
+    stroke: BrushStroke, h: int, w: int
+) -> tuple[tuple[int, int, int, int], np.ndarray] | None:
+    """Rasterize one stroke inside its bounding box only. Returns the box as
+    (y0, y1, x0, x1) plus the patch, or None when the box is empty."""
     r_px = stroke.radius * min(h, w)
     pts_px = [(x * w, y * h) for x, y in stroke.points]
     xs = [p[0] for p in pts_px]
@@ -72,24 +74,44 @@ def stroke_weight(stroke: BrushStroke, h: int, w: int) -> np.ndarray:
     pad = int(np.ceil(r_px)) + 2
     x0, x1 = max(0, int(min(xs)) - pad), min(w, int(max(xs)) + pad)
     y0, y1 = max(0, int(min(ys)) - pad), min(h, int(max(ys)) + pad)
-    out = np.zeros((h, w), dtype=np.float32)
     if x1 <= x0 or y1 <= y0:
-        return out
+        return None
     yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
     d = _dist_to_polyline(xx + 0.5, yy + 0.5, pts_px)
     hard = r_px * (1.0 - stroke.feather / 100)
-    out[y0:y1, x0:x1] = (1.0 - _smoothstep(hard, max(r_px, hard + 0.5), d)) * (stroke.flow / 100)
+    patch = (1.0 - _smoothstep(hard, max(r_px, hard + 0.5), d)) * (stroke.flow / 100)
+    return (y0, y1, x0, x1), patch.astype(np.float32)
+
+
+def stroke_weight(stroke: BrushStroke, h: int, w: int) -> np.ndarray:
+    """Rasterize one stroke to an HxW weight map, computed only inside the
+    stroke's bounding box for speed."""
+    out = np.zeros((h, w), dtype=np.float32)
+    patch = _stroke_patch(stroke, h, w)
+    if patch is not None:
+        (y0, y1, x0, x1), p = patch
+        out[y0:y1, x0:x1] = p
     return out
 
 
 def _brush_weight(mask: BrushMask, h: int, w: int) -> np.ndarray:
+    """Accumulate every stroke into one shared buffer.
+
+    Both composites leave the weight untouched wherever the stroke weight is
+    zero, so each stroke only has to be applied inside its own bounding box —
+    one buffer for the mask instead of three full frames per stroke.
+    """
     weight = np.zeros((h, w), dtype=np.float32)
     for stroke in mask.strokes:
-        sw = stroke_weight(stroke, h, w)
+        patch = _stroke_patch(stroke, h, w)
+        if patch is None:
+            continue
+        (y0, y1, x0, x1), sw = patch
+        sub = weight[y0:y1, x0:x1]
         if stroke.erase:
-            weight = weight * (1.0 - sw)
+            sub *= 1.0 - sw
         else:
-            weight = 1.0 - (1.0 - weight) * (1.0 - sw)  # accumulate like paint
+            np.subtract(1.0, (1.0 - sub) * (1.0 - sw), out=sub)  # accumulate like paint
     return weight
 
 
@@ -144,9 +166,17 @@ def mask_weight(mask: Mask, img: np.ndarray) -> np.ndarray:
     return weight * (mask.opacity / 100)
 
 
-def _adjust(img: np.ndarray, adj: LocalAdjustments) -> np.ndarray:
-    """Apply the local sliders to the whole frame (blending happens later)."""
+def _adjust(
+    img: np.ndarray, adj: LocalAdjustments, frame: tuple[int, int] | None = None
+) -> np.ndarray:
+    """Apply the local sliders to `img` (blending happens later).
+
+    `frame` is the size of the full rendered frame, which may be larger than
+    `img` when only a mask's bounding box is being adjusted. Radii are sized
+    from it so a cropped run matches the full-frame one pixel for pixel.
+    """
     out = np.clip(img, 0, 1)
+    fh, fw = frame if frame is not None else img.shape[:2]
 
     if adj.exposure or adj.temp or adj.tint or adj.highlights or adj.shadows:
         lin = out ** _GAMMA
@@ -170,23 +200,73 @@ def _adjust(img: np.ndarray, adj: LocalAdjustments) -> np.ndarray:
         gray = _luma(out)[..., None]
         out = np.clip(gray + (out - gray) * (1.0 + adj.saturation / 100), 0, 1)
     if adj.sharpness:
-        sigma = max(1.0, min(out.shape[0], out.shape[1]) / 1500)
+        sigma = max(1.0, min(fh, fw) / 1500)
         blurred = fast_blur(out, sigma)
         out = np.clip(out + (out - blurred) * (adj.sharpness / 100) * 1.5, 0, 1)
 
     return np.clip(out, 0, 1)
 
 
+#: A crop has to earn its keep: below this share of the frame the second pass
+#: over the weight map costs less than the pixels it saves adjusting.
+_CROP_MAX_AREA = 0.5
+
+
+def _adjust_margin(adj: LocalAdjustments, fh: int, fw: int) -> int | None:
+    """How much context around a region `_adjust` needs to render it exactly,
+    or None when no crop is safe.
+
+    Dehaze and clarity size their blur radii from the frame they are handed,
+    so a cropped run would not merely lose context — it would use a different
+    radius and render something else.
+    """
+    if adj.dehaze or adj.clarity:
+        return None
+    if not adj.sharpness:
+        return 0  # everything else is pointwise
+    return 3 * box_radius(max(1.0, min(fh, fw) / 1500))
+
+
+def _weight_box(weight: np.ndarray, margin: int) -> tuple[int, int, int, int] | None:
+    """Bounding box of the pixels a weight map can actually change, or None
+    if it is too large to be worth cropping to."""
+    h, w = weight.shape
+    touched = weight > 0
+    rows = np.flatnonzero(touched.any(axis=1))
+    if rows.size == 0:
+        return None
+    cols = np.flatnonzero(touched.any(axis=0))
+    y0, y1 = max(0, rows[0] - margin), min(h, rows[-1] + 1 + margin)
+    x0, x1 = max(0, cols[0] - margin), min(w, cols[-1] + 1 + margin)
+    if (y1 - y0) * (x1 - x0) > _CROP_MAX_AREA * h * w:
+        return None
+    if margin and min(y1 - y0, x1 - x0) <= margin:
+        return None  # too thin for the blur to keep its full radius
+    return y0, y1, x0, x1
+
+
 def apply_masks(img: np.ndarray, masks: list[Mask]) -> np.ndarray:
     if not masks:
         return img
-    out = np.clip(img, 0, 1)
+    # One float32 frame that every mask blends into: np.clip gives us a buffer
+    # nobody else holds, and keeping it float32 also stops _adjust's incidental
+    # float64 scalars from silently promoting the whole frame.
+    out = np.clip(img, 0, 1).astype(np.float32, copy=False)
+    h, w = out.shape[:2]
     for mask in masks:
         if mask.adjustments == LocalAdjustments() or mask.opacity == 0:
             continue
         weight = mask_weight(mask, out)
         if weight.max() < 1e-4:
             continue
-        adjusted = _adjust(out, mask.adjustments)
-        out = out * (1.0 - weight[..., None]) + adjusted * weight[..., None]
+        # Where the weight is zero the blend returns the pixel untouched, so a
+        # brush dab need not pay for adjusting the other 23 megapixels.
+        margin = _adjust_margin(mask.adjustments, h, w)
+        box = _weight_box(weight, margin) if margin is not None else None
+        y0, y1, x0, x1 = box if box is not None else (0, h, 0, w)
+        sub = out[y0:y1, x0:x1]
+        wt = weight[y0:y1, x0:x1, None]
+        adjusted = _adjust(sub, mask.adjustments, (h, w))
+        sub *= 1.0 - wt
+        sub += adjusted * wt
     return out

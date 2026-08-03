@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronRight, FileImage, Pencil, RotateCcw, Wand2 } from 'lucide-react'
 import { api } from '../api'
+import { HSL_CHANNEL_ORDER, HSL_HUE_RANGE, HUE_CENTERS, publish, setAt, type LiveRecipe } from '../gpu'
 import { pushAction } from '../undo'
-import { DevelopExtras } from './DevelopExtras'
+import { DevelopExtras, useDebouncedCommit } from './DevelopExtras'
 import { Histogram } from './Histogram'
 
 interface SliderDef {
@@ -28,9 +29,8 @@ const hueRail = (span?: { center: number; range: number }): string => {
   return `linear-gradient(to right, ${stops.map((h) => `hsl(${h} 85% 55%)`).join(', ')})`
 }
 
-/** A band a swatch row can select. `hue` colors the swatch and, for the mixer,
- *  mirrors the band centers in engine/ops/color.py; `swatch` overrides it for
- *  bands that aren't a hue (the tonal grading bands). */
+/** A band a swatch row can select. `hue` colors the swatch; `swatch` overrides
+ *  it for bands that aren't a hue (the tonal grading bands). */
 interface Channel {
   key: string
   label: string
@@ -40,20 +40,13 @@ interface Channel {
 
 const swatchColor = (c: Channel) => c.swatch ?? `hsl(${c.hue ?? 0} 85% 55%)`
 
-const HSL_CHANNELS: Channel[] = [
-  { key: 'red', label: 'Red', hue: 0 },
-  { key: 'orange', label: 'Orange', hue: 30 },
-  { key: 'yellow', label: 'Yellow', hue: 60 },
-  { key: 'green', label: 'Green', hue: 120 },
-  { key: 'aqua', label: 'Aqua', hue: 180 },
-  { key: 'blue', label: 'Blue', hue: 240 },
-  { key: 'purple', label: 'Purple', hue: 280 },
-  { key: 'magenta', label: 'Magenta', hue: 320 },
-]
-
-/** The mixer's hue slider is a relative shift, and the engine caps it at +-30
- *  degrees around the band center — so that's exactly what the rail shows. */
-const HSL_HUE_RANGE = 30
+// Band centers come from gpu/constants, which is also what the shader is built
+// from — one copy of a number that has to agree with engine/ops/color.py.
+const HSL_CHANNELS: Channel[] = HSL_CHANNEL_ORDER.map((key) => ({
+  key,
+  label: key[0].toUpperCase() + key.slice(1),
+  hue: HUE_CENTERS[key],
+}))
 
 const hslSliders = (c: Channel): SliderDef[] => [
   { label: 'Hue', path: ['color', 'hsl', c.key, 'hue'], min: -100, max: 100, step: 1, def: 0, rail: 'hue', hueSpan: { center: c.hue ?? 0, range: HSL_HUE_RANGE } },
@@ -237,6 +230,8 @@ export function EditPanel({
   renderTick = 0,
   onRecipeChange,
   onLiveFilter,
+  live,
+  onCommitted,
 }: {
   imageId: string
   previewSrc: string
@@ -249,6 +244,11 @@ export function EditPanel({
   onRecipeChange: () => void
   /** instant CSS-filter feedback while dragging (cleared when render lands) */
   onLiveFilter?: (filter: string) => void
+  /** Slider state, published synchronously for the GPU renderer to poll. This
+   *  is not React state on purpose — see gpu/live.ts. */
+  live?: LiveRecipe
+  /** fires once an edit has actually been persisted */
+  onCommitted?: () => void
   onProof: (space: string | null) => void
 }) {
   const [folded, setFolded] = useState<Record<string, boolean>>(() =>
@@ -259,15 +259,19 @@ export function EditPanel({
   const [versionTick, setVersionTick] = useState(0)
   const [recipe, setRecipeState] = useState<Record<string, any> | null>(null)
   const recipeRef = useRef<Record<string, any> | null>(null)
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const debounced = useDebouncedCommit()
   const lastSaved = useRef<Record<string, any> | null>(null)
   // recipe of the render currently on screen — the CSS live filter is always
   // the delta between the slider state and THIS, so approximation and pixels
   // never fight each other
   const displayed = useRef<Record<string, any> | null>(null)
 
+  /** Publishes to the render loop *before* touching state, on purpose: the
+   *  GPU sees the new value in this tick regardless of when React chooses to
+   *  commit, so the preview never trails the slider by a frame. */
   const setRecipe = (r: Record<string, any>) => {
     recipeRef.current = r
+    if (live) publish(live, r)
     setRecipeState(r)
   }
 
@@ -296,25 +300,29 @@ export function EditPanel({
       redo: () => api.putRecipe(id, next),
     })
 
+  // Persistence only. While dragging, the preview comes from the GPU (or the
+  // CSS approximation where the GPU cannot help), so intermediate states never
+  // need to reach the server.
   const commit = (patch: object) => {
-    if (timer.current) clearTimeout(timer.current)
-    timer.current = setTimeout(async () => {
-      timer.current = null
-      const prev = lastSaved.current
-      const updated = await api.patchRecipe(imageId, patch)
-      if (prev) record(imageId, prev, updated)
-      lastSaved.current = updated
-      // trigger a render only if no newer edit is already pending — while
-      // dragging, intermediate states are covered by the CSS approximation
-      if (!timer.current) onRecipeChange()
-    }, 300)
+    debounced(
+      async () => {
+        const prev = lastSaved.current
+        const updated = await api.patchRecipe(imageId, patch)
+        if (prev) record(imageId, prev, updated)
+        lastSaved.current = updated
+      },
+      () => {
+        onRecipeChange()
+        onCommitted?.()
+      },
+    )
   }
 
   const setValue = (def: SliderDef, value: number) => {
-    const next = structuredClone(recipeRef.current ?? {})
-    let o: any = next
-    for (const k of def.path.slice(0, -1)) o = o[k] ?? (o[k] = {})
-    o[def.path[def.path.length - 1]] = value
+    // Path copy rather than a structuredClone of the whole recipe: this runs
+    // on every pointer-move tick, and all but one of a few hundred fields are
+    // unchanged.
+    const next = setAt(recipeRef.current ?? {}, def.path, value)
     setRecipe(next)
     onLiveFilter?.(liveDeltaFilter(next, displayed.current))
     commit(patchFor(def.path, value))
@@ -327,6 +335,7 @@ export function EditPanel({
     lastSaved.current = updated
     setRecipe(updated)
     onRecipeChange()
+    onCommitted?.()
   }
 
   const auto = async () => {
@@ -336,6 +345,7 @@ export function EditPanel({
     lastSaved.current = updated
     setRecipe(updated)
     onRecipeChange()
+    onCommitted?.()
   }
 
   if (!recipe) return <div className="w-72 shrink-0 bg-base-200 p-4">…</div>
@@ -469,9 +479,7 @@ export function EditPanel({
                       checked={asShot}
                       onChange={(e) => {
                         if (e.target.checked) {
-                          const next = structuredClone(recipeRef.current ?? {})
-                          next.whiteBalance = { ...next.whiteBalance, temp: null }
-                          setRecipe(next)
+                          setRecipe(setAt(recipeRef.current ?? {}, ['whiteBalance', 'temp'], null))
                           commit({ whiteBalance: { temp: null } })
                         } else {
                           setValue(s, s.def)

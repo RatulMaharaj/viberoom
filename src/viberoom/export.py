@@ -28,44 +28,77 @@ def default_extension(fmt: ExportFormat) -> str:
     return _EXTENSIONS[fmt]
 
 
-def _write_png16(arr: np.ndarray, out_path: Path, icc: bytes | None = None) -> None:
-    """Minimal 16-bit RGB PNG writer (big-endian samples, per PNG spec)."""
-    h, w = arr.shape[:2]
-    raw = arr.astype(">u2").tobytes()
-    stride = w * 3 * 2
-    scanlines = b"".join(
-        b"\x00" + raw[y * stride:(y + 1) * stride] for y in range(h)
+def _chunk(tag: bytes, data: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(data)) + tag + data
+        + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
     )
 
-    def chunk(tag: bytes, data: bytes) -> bytes:
-        return (
-            struct.pack(">I", len(data)) + tag + data
-            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-        )
+
+def _write_png16(arr: np.ndarray, out_path: Path, icc: bytes | None = None) -> None:
+    """Minimal 16-bit RGB PNG writer (big-endian samples, per PNG spec).
+
+    Full-res 16-bit frames are large enough that holding the pixels, the
+    filtered scanlines and the deflate output alive at once dominates export
+    memory, so the scanlines are built as one array and streamed straight into
+    the file: the IDAT length is back-patched once the stream is finished."""
+    h, w = arr.shape[:2]
+    stride = w * 3 * 2
+    if arr.dtype != np.uint16:
+        arr = arr.astype(np.uint16)
+
+    # Column 0 of every row stays zero: PNG filter type 0 (None).
+    rows = np.zeros((h, 1 + stride), dtype=np.uint8)
+    samples = rows[:, 1:].reshape(h, w * 3, 2)
+    flat = arr.reshape(h, w * 3)
+    samples[..., 0] = flat >> 8
+    samples[..., 1] = flat & 0xFF
 
     ihdr = struct.pack(">IIBBBBB", w, h, 16, 2, 0, 0, 0)  # depth 16, color RGB
     color_chunk = (
-        chunk(b"iCCP", b"ICC profile\x00\x00" + zlib.compress(icc, 6))
-        if icc else chunk(b"sRGB", b"\x00")
+        _chunk(b"iCCP", b"ICC profile\x00\x00" + zlib.compress(icc, 6))
+        if icc else _chunk(b"sRGB", b"\x00")
     )
-    payload = (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", ihdr)
-        + color_chunk
-        + chunk(b"IDAT", zlib.compress(scanlines, 6))
-        + chunk(b"IEND", b"")
-    )
-    out_path.write_bytes(payload)
+
+    # Feed deflate in row blocks of roughly 4 MiB so no full copy of the
+    # scanlines or of the compressed payload ever exists as bytes.
+    block = max(1, (4 << 20) // (1 + stride))
+    comp = zlib.compressobj(6)
+    crc = zlib.crc32(b"IDAT")
+    length = 0
+
+    with open(out_path, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + color_chunk)
+        len_pos = fh.tell()
+        fh.write(struct.pack(">I", 0) + b"IDAT")
+        for y in range(0, h, block):
+            piece = comp.compress(rows[y:y + block].tobytes())
+            if piece:
+                crc = zlib.crc32(piece, crc)
+                length += len(piece)
+                fh.write(piece)
+        piece = comp.flush()
+        if piece:
+            crc = zlib.crc32(piece, crc)
+            length += len(piece)
+            fh.write(piece)
+        fh.write(struct.pack(">I", crc & 0xFFFFFFFF) + _chunk(b"IEND", b""))
+        fh.seek(len_pos)
+        fh.write(struct.pack(">I", length))
 
 
-def _source_exif(src: Path, iptc: dict | None = None) -> bytes:
-    """Basic EXIF carry-over when the source has it (best-effort for RAW),
-    plus IPTC-style description fields mapped onto standard EXIF tags."""
+def _read_exif(src: Path) -> Image.Exif:
+    """Source EXIF, best-effort: RAW and odd sources may not open at all."""
     try:
         with Image.open(src) as orig:
-            exif = orig.getexif()
+            return orig.getexif()
     except Exception:
-        exif = Image.Exif()
+        return Image.Exif()
+
+
+def _source_exif(exif: Image.Exif, iptc: dict | None = None) -> bytes:
+    """Basic EXIF carry-over when the source has it (best-effort for RAW),
+    plus IPTC-style description fields mapped onto standard EXIF tags."""
     for tag, key in ((270, "caption"), (315, "creator"), (33432, "copyright")):
         if iptc and iptc.get(key):
             exif[tag] = iptc[key]
@@ -105,10 +138,12 @@ def export_image(
     if fmt == "png" and bit_depth == 16:
         rgbf = render_full_float(src, recipe)
         if max_dimension:
-            im8 = Image.fromarray((rgbf * 255).round().astype(np.uint8))
-            im8.thumbnail((max_dimension, max_dimension), Image.LANCZOS)
+            # Only the target size is wanted here, so probe with a blank
+            # single-channel image rather than converting the real pixels.
+            probe = Image.new("L", (rgbf.shape[1], rgbf.shape[0]))
+            probe.thumbnail((max_dimension, max_dimension), Image.LANCZOS)
             # resize in float via PIL per channel to keep 16-bit precision
-            th, tw = im8.height, im8.width
+            th, tw = probe.height, probe.width
             chans = [
                 np.asarray(
                     Image.fromarray(rgbf[..., c], mode="F").resize((tw, th), Image.LANCZOS)
@@ -148,17 +183,20 @@ def export_image(
             margin=watermark.get("margin", 2.5),
         )
 
+    if fmt == "png":
+        im.save(out_path, "PNG", icc_profile=icc)
+        return out_path
+
+    exif = _source_exif(_read_exif(src), iptc)
     if fmt == "jpeg":
         im.save(
             out_path, "JPEG",
-            quality=quality, icc_profile=icc, exif=_source_exif(src, iptc), optimize=True,
+            quality=quality, icc_profile=icc, exif=exif, optimize=True,
         )
-    elif fmt == "png":
-        im.save(out_path, "PNG", icc_profile=icc)
     else:  # tiff
         im.save(
             out_path, "TIFF",
-            icc_profile=icc, compression="tiff_deflate", exif=_source_exif(src, iptc),
+            icc_profile=icc, compression="tiff_deflate", exif=exif,
         )
     return out_path
 

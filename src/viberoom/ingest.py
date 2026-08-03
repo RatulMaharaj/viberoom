@@ -30,6 +30,11 @@ def _sha1(path: Path) -> str:
     return h.hexdigest()
 
 
+def _head(path: Path, n: int = 1 << 16) -> bytes:
+    with open(path, "rb") as fh:
+        return fh.read(n)
+
+
 def _capture_datetime(path: Path) -> datetime:
     from viberoom.catalog.metadata import read_metadata
 
@@ -94,6 +99,15 @@ def import_files(
         for row in db.query("SELECT rel_path, filesize FROM images"):
             by_size.setdefault(row["filesize"], []).append(row["rel_path"])
     hash_cache: dict[str, str] = {}
+    head_cache: dict[str, bytes] = {}
+
+    def existing_head(rel: str) -> bytes | None:
+        if rel not in head_cache:
+            p = library.root / rel
+            if not p.is_file():
+                return None
+            head_cache[rel] = _head(p)
+        return head_cache[rel]
 
     def existing_hash(rel: str) -> str | None:
         if rel not in hash_cache:
@@ -117,10 +131,18 @@ def import_files(
         try:
             size = src.stat().st_size
             if dedupe and size in by_size:
-                src_hash = _sha1(src)
-                if any(existing_hash(rel) == src_hash for rel in by_size[size]):
-                    skipped_dupes += 1
-                    continue
+                # same-size files are usually different photos; comparing a
+                # leading block first rules them out without reading either
+                # file whole, and equal content implies equal heads
+                src_head = _head(src)
+                candidates = [
+                    rel for rel in by_size[size] if existing_head(rel) == src_head
+                ]
+                if candidates:
+                    src_hash = _sha1(src)
+                    if any(existing_hash(rel) == src_hash for rel in candidates):
+                        skipped_dupes += 1
+                        continue
             seq += 1
             rel = _render_name(rename, src, seq)
             dest = _unique_dest(library.root / rel)

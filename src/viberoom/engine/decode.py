@@ -23,6 +23,19 @@ def _srgb_to_linear(x: np.ndarray) -> np.ndarray:
 
 
 def linear_to_srgb(x: np.ndarray) -> np.ndarray:
+    # Left as a plain np.where deliberately. It looks wasteful — both branches
+    # are evaluated over the whole frame, including the expensive pow — but
+    # every alternative measured worse:
+    #
+    #   masked copyto        8% faster, and needs more peak memory
+    #   boolean gather       faster on bright frames, up to 30% *slower* on
+    #                        dark ones, where most pixels take the gather
+    #   4096-entry LUT       2.5x faster, but errs ~3e-3 — invisible at 8 bits
+    #                        and hopeless for the 16-bit export this feeds
+    #   np.interp            12x slower
+    #
+    # The pow is irreducible without giving up precision, and this op is
+    # roughly a tenth of a render, so 8% of it was never the win it looked.
     x = np.clip(x, 0, 1)
     return np.where(x <= 0.0031308, x * 12.92, 1.055 * x ** (1 / _SRGB_GAMMA) - 0.055)
 

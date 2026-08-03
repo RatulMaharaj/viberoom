@@ -6,7 +6,16 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 /** Where a single click lands. Scale is relative to fit, so 2 is twice the
  *  fitted size — enough to judge focus without losing your place. */
 const CLICK_ZOOM = 2
-export function ZoomableImage({ src, alt, resetKey, filter, onZoomChange, onLoaded }: {
+export function ZoomableImage({
+  src,
+  alt,
+  resetKey,
+  filter,
+  onZoomChange,
+  onLoaded,
+  overlay,
+  hideImage = false,
+}: {
   src: string
   alt: string
   /** zoom/pan reset when this changes (not on src changes, so the src can be
@@ -17,6 +26,12 @@ export function ZoomableImage({ src, alt, resetKey, filter, onZoomChange, onLoad
   onZoomChange?: (zoomed: boolean) => void
   /** fires when a (new) src finishes loading */
   onLoaded?: () => void
+  /** An alternative surface — the GPU canvas — laid out where the image is and
+   *  handed the same transform, so zoom and pan apply to whichever is showing. */
+  overlay?: (transform: React.CSSProperties) => React.ReactNode
+  /** Hide the <img> rather than unmount it, so a src that is still current
+   *  does not have to be re-decoded when it comes back. */
+  hideImage?: boolean
 }) {
   const container = useRef<HTMLDivElement>(null)
   const [t, setT] = useState({ scale: 1, x: 0, y: 0 })
@@ -104,6 +119,11 @@ export function ZoomableImage({ src, alt, resetKey, filter, onZoomChange, onLoad
     setT(clamp({ scale: CLICK_ZOOM, x: -cx * (CLICK_ZOOM - 1), y: -cy * (CLICK_ZOOM - 1) }))
   }
 
+  const transform: React.CSSProperties = {
+    transform: `translate(${t.x}px, ${t.y}px) scale(${t.scale})`,
+    transition: drag.current ? 'none' : 'transform 120ms ease-out',
+  }
+
   return (
     <div
       ref={container}
@@ -122,11 +142,12 @@ export function ZoomableImage({ src, alt, resetKey, filter, onZoomChange, onLoad
         onLoad={onLoaded}
         className="max-h-full max-w-full object-contain"
         style={{
-          transform: `translate(${t.x}px, ${t.y}px) scale(${t.scale})`,
-          transition: drag.current ? 'none' : 'transform 120ms ease-out',
+          ...transform,
           filter: filter || undefined,
+          display: hideImage ? 'none' : undefined,
         }}
       />
+      {overlay?.(transform)}
     </div>
   )
 }

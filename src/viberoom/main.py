@@ -4,13 +4,23 @@ and the MCP server alike."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
@@ -20,7 +30,7 @@ from viberoom import presets as preset_store
 from viberoom import state
 from viberoom.catalog.scanner import scan
 from viberoom.config import Library, load_last_library, save_last_library
-from viberoom.engine.cache import render_preview
+from viberoom.engine.cache import preview_cache_key, render_preview
 from viberoom.engine.decode import extract_thumbnail
 from viberoom.export import ExportFormat, default_extension, export_image as export_file
 from viberoom.recipe.merge import deep_merge
@@ -42,15 +52,33 @@ _approve_app = permission_mcp.mcp.streamable_http_app(streamable_http_path="/mcp
 
 
 _mcp_stack: AsyncExitStack | None = None
+#: Held at module scope only so asyncio does not garbage-collect the running
+#: startup rescan out from under itself.
+_startup_scan: asyncio.Task | None = None
+
+
+def _log_startup_scan(task: asyncio.Task) -> None:
+    """Surface a failed background rescan instead of letting asyncio swallow it
+    into an un-retrieved exception at interpreter shutdown."""
+    if not task.cancelled() and task.exception() is not None:
+        import traceback
+
+        traceback.print_exception(task.exception())
 
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
-    global _mcp_stack
+    global _mcp_stack, _startup_scan
     lib = load_last_library()
     if lib is not None:
         state.open_library(lib)
-        scan(lib, state.db())
+        # Reopening the last library used to scan it synchronously here, so on
+        # a large catalog the server accepted no connections until the whole
+        # tree had been walked. The rows from the previous session are already
+        # in the DB, so the UI has something to show immediately; the rescan
+        # only reconciles what changed while we were away.
+        _startup_scan = asyncio.create_task(run_in_threadpool(scan, lib, state.db()))
+        _startup_scan.add_done_callback(_log_startup_scan)
     # The MCP session managers are single-use, but tests enter this lifespan
     # once per TestClient — so start them at most once and leave them up for
     # the life of the process.
@@ -394,13 +422,24 @@ async def events():
                         rel = str(Path(p).relative_to(lib.root))[: -len(SIDECAR_SUFFIX)]
                     except ValueError:
                         rel = p[: -len(SIDECAR_SUFFIX)]  # extra roots: absolute
-                    iid = make_id(rel)
-                    _sync_sidecar_to_db(iid)
-                    ids.add(iid)
+                    ids.add(make_id(rel))
             if ids:
+                # Off the event loop, and once for the whole batch rather than
+                # once per file: each id is a SQLite round-trip plus a sidecar
+                # read, and a batch metadata edit over a large selection would
+                # otherwise stall every other request for the duration.
+                await run_in_threadpool(_sync_sidecars_to_db, sorted(ids))
                 yield {"event": "sidecar", "data": json.dumps(sorted(ids))}
 
     return EventSourceResponse(gen())
+
+
+def _sync_sidecars_to_db(image_ids: list[str]) -> None:
+    """Refresh several rows in one transaction — the watcher reports changes in
+    batches, and committing per file is what made a bulk edit expensive."""
+    with state.db().transaction():
+        for image_id in image_ids:
+            _sync_sidecar_to_db(image_id)
 
 
 def _sync_sidecar_to_db(image_id: str) -> None:
@@ -532,15 +571,59 @@ def make_dir(body: MkdirIn) -> dict:
 
 # ---------- images ----------
 
+# Everything a grid row needs, minus the multi-KB exif_json blob: parsing it for
+# 500 rows dominated the list endpoint. faces_json is likewise counted in SQL.
+# The full blob still ships from GET /images/{id}, which is what the editor reads.
+_LIST_COLUMNS = (
+    "id, rel_path, filename, ext, is_raw, filesize, mtime, width, height, rating,"
+    " flag, has_edits, sidecar_mtime, label, keywords_json, camera, lens, iso,"
+    " focal_length, aperture, shutter, taken_at, stack_id, gps_lat, gps_lon, dhash,"
+    " CASE WHEN faces_json IS NULL THEN NULL ELSE json_array_length(faces_json) END AS faces"
+)
+
+
+def _summary_exif(d: dict) -> dict:
+    """Rebuild the handful of EXIF keys the UI's caption line reads out of the
+    denormalized columns, so list rows keep the same `exif` shape as detail rows.
+    Values are strings because that is what the scanner stores."""
+    pairs = (
+        ("Model", d.get("camera")), ("LensModel", d.get("lens")),
+        ("ISO", d.get("iso")), ("FocalLength", d.get("focal_length")),
+        ("FNumber", d.get("aperture")), ("ExposureTime", d.get("shutter")),
+        ("DateTimeOriginal", d.get("taken_at")),
+    )
+    return {k: str(v) for k, v in pairs if v is not None}
+
+
 def _row_to_dict(row) -> dict:
     d = dict(row)
-    d["exif"] = json.loads(d.pop("exif_json"))
+    if "exif_json" in d:
+        d["exif"] = json.loads(d.pop("exif_json"))
+    else:
+        d["exif"] = _summary_exif(d)
     d["keywords"] = json.loads(d.pop("keywords_json") or "[]")
-    faces = d.pop("faces_json", None)
-    d["faces"] = len(json.loads(faces)) if faces else None  # None = not scanned
+    if "faces_json" in d:
+        faces = d.pop("faces_json")
+        d["faces"] = len(json.loads(faces)) if faces else None  # None = not scanned
     d["is_raw"] = bool(d["is_raw"])
     d["has_edits"] = bool(d["has_edits"])
     return d
+
+
+def _image_paths(image_ids: list[str]) -> dict[str, Path]:
+    """Resolve many ids in one pass — a batch op over 1000 ids was 1000 queries.
+    Unknown ids are simply absent from the result."""
+    lib = state.require_library()
+    found: dict[str, Path] = {}
+    for i in range(0, len(image_ids), 500):  # SQLITE_MAX_VARIABLE_NUMBER is 999
+        chunk = image_ids[i:i + 500]
+        rows = state.db().query(
+            f"SELECT id, rel_path FROM images WHERE id IN ({','.join('?' * len(chunk))})",
+            tuple(chunk),
+        )
+        for r in rows:
+            found[r["id"]] = lib.resolve(r["rel_path"])
+    return found
 
 
 def _image_path(image_id: str) -> Path:
@@ -676,7 +759,8 @@ def list_images(
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     total = state.db().query(f"SELECT COUNT(*) AS n FROM images {clause}", tuple(params))[0]["n"]
     rows = state.db().query(
-        f"SELECT * FROM images {clause} ORDER BY {sort} {order.upper()} LIMIT ? OFFSET ?",
+        f"SELECT {_LIST_COLUMNS} FROM images {clause}"
+        f" ORDER BY {sort} {order.upper()} LIMIT ? OFFSET ?",
         tuple(params) + (limit, offset),
     )
     return {"total": total, "images": [_row_to_dict(r) for r in rows]}
@@ -775,8 +859,10 @@ def create_stack(body: StackIn) -> dict:
     from viberoom.catalog.stacks import set_stack
 
     state.require_library()
+    known = _image_paths(body.image_ids)
     for iid in body.image_ids:
-        _image_path(iid)  # 404 on unknown ids
+        if iid not in known:
+            raise HTTPException(404, f"unknown image id {iid}")
     return set_stack(state.db(), body.image_ids)
 
 
@@ -1215,23 +1301,61 @@ def _recipe_for_variant(sc: Sidecar, variant: str | None) -> Recipe:
 
 # ---------- previews ----------
 
+#: Rendered imagery is addressed by a key that already covers the file mtime,
+#: the recipe and the pipeline version, so a given URL+ETag pair can never
+#: describe different pixels. That makes the response genuinely immutable and
+#: lets the browser skip revalidation entirely for a year.
+_IMMUTABLE = "private, max-age=31536000, immutable"
+
+
+def _etag_response(
+    request: Request, data: bytes, etag_key: str, media_type: str, **headers: str
+) -> Response:
+    """Response with an ETag, answering 304 when the client already has it.
+
+    Without this every navigation re-downloaded all 500 grid thumbnails: the
+    bytes were disk-cached server-side but nothing told the browser it could
+    reuse what it already had.
+    """
+    etag = f'"{hashlib.sha1(etag_key.encode()).hexdigest()}"'
+    common = {"ETag": etag, "Cache-Control": _IMMUTABLE, **headers}
+
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=common)
+    return Response(content=data, media_type=media_type, headers=common)
+
+
+def _image_response(request: Request, data: bytes, etag_key: str, **headers: str) -> Response:
+    """JPEG flavor of `_etag_response` — the shape nearly every route wants."""
+    return _etag_response(request, data, etag_key, "image/jpeg", **headers)
+
+
 @api.get("/images/{image_id}/thumbnail")
-def thumbnail(image_id: str) -> Response:
+def thumbnail(image_id: str, request: Request) -> Response:
     lib = state.require_library()
     path = _image_path(image_id)
-    key = f"thumb-{image_id}-{path.stat().st_mtime}"
+    key = f"thumb-{image_id}-{path.stat().st_mtime_ns}"
     cached = lib.cache_dir / f"{key}.jpg"
+
+    # Answer the conditional request before touching the disk at all — a warm
+    # grid then costs one stat() per image instead of a JPEG read and resend.
+    if request.headers.get("if-none-match"):
+        probe = _image_response(request, b"", key)
+        if probe.status_code == 304:
+            return probe
+
     if cached.exists():
         data = cached.read_bytes()
     else:
         data = extract_thumbnail(path)
         cached.write_bytes(data)
-    return Response(content=data, media_type="image/jpeg")
+    return _image_response(request, data, key)
 
 
 @api.get("/images/{image_id}/preview")
 def preview(
     image_id: str,
+    request: Request,
     size: Annotated[int, Query(ge=256, le=4096)] = 1600,
     original: bool = False,
     nocrop: bool = False,
@@ -1246,13 +1370,76 @@ def preview(
     if nocrop:
         recipe = recipe.model_copy(deep=True)
         recipe.geometry.crop = Crop()
+
+    # The disk cache key already hashes path, mtime, recipe and pipeline
+    # version — exactly the identity an ETag needs — so reuse it rather than
+    # inventing a second, subtly different one.
+    key = preview_cache_key(path, recipe, size)
+    if request.headers.get("if-none-match"):
+        probe = _image_response(request, b"", key)
+        if probe.status_code == 304:
+            return probe
+
     data = render_preview(path, recipe, size, lib.cache_dir)
-    return Response(content=data, media_type="image/jpeg")
+    return _image_response(request, data, key, **{"X-Recipe-Hash": key})
+
+
+@api.get("/images/{image_id}/source")
+def source(
+    image_id: str,
+    request: Request,
+    size: Annotated[int, Query(ge=256, le=4096)] = 1600,
+    format: Literal["rgb9e5", "rgba16f"] = "rgb9e5",
+) -> Response:
+    """The decoded linear frame as raw WebGL texture bytes.
+
+    This is what lets the browser run the pointwise half of the pipeline
+    itself, so a slider drag costs a shader pass instead of a render and a
+    JPEG download. `size` means what it means for /preview, and the frame
+    comes back at the resolution the server would have *rendered* that
+    preview at — X-Source-Width/Height report it, and the client must honor
+    them or its frame is a different image from the one it settles to.
+
+    Deliberately uncompressed: the payload is float mantissas, so gzip finds
+    about 5% for a couple hundred milliseconds of CPU, over loopback.
+    """
+    from viberoom.engine.cache import PIPELINE_VERSION
+    from viberoom.engine.source import cached_source_dims, source_bytes
+
+    lib = state.require_library()
+    path = _image_path(image_id)
+    key = f"source-v{PIPELINE_VERSION}|{path}|{path.stat().st_mtime_ns}|{size}|{format}"
+
+    def _headers(w: int, h: int) -> dict[str, str]:
+        return {
+            "X-Source-Width": str(w),
+            "X-Source-Height": str(h),
+            "X-Source-Format": format,
+            "X-Pipeline-Version": str(PIPELINE_VERSION),
+        }
+
+    # Answer the conditional request before decoding anything. The dimensions
+    # still ship on the 304 so a client that revalidates rather than reusing
+    # its own cached headers is not left guessing.
+    if request.headers.get("if-none-match"):
+        dims = cached_source_dims(path, size, format, lib.cache_dir)
+        if dims is not None:
+            probe = _etag_response(
+                request, b"", key, "application/octet-stream", **_headers(*dims)
+            )
+            if probe.status_code == 304:
+                return probe
+
+    data, w, h = source_bytes(path, size, format, lib.cache_dir)
+    return _etag_response(
+        request, data, key, "application/octet-stream", **_headers(w, h)
+    )
 
 
 @api.get("/images/{image_id}/proof")
 def soft_proof(
     image_id: str,
+    request: Request,
     space: Literal["display-p3", "adobe-rgb", "prophoto"] = "display-p3",
     warn: bool = False,
     size: Annotated[int, Query(ge=256, le=4096)] = 1600,
@@ -1263,25 +1450,54 @@ def soft_proof(
     targets rarely clip; the endpoint exists for the day decode goes wide.)"""
     import io as _io
 
+    import numpy as np
+
     from viberoom.color_mgmt import convert_from_srgb
     from viberoom.engine.cache import _decode_cache
     from viberoom.engine.pipeline import render_float
 
+    lib = state.require_library()
     path = _image_path(image_id)
+    recipe = load_sidecar(path).recipe
+
+    # Proofing was the one preview endpoint with no disk cache, so every poll
+    # of the same unchanged image paid for a full render plus a colour-space
+    # conversion. The space and warn flags are part of the identity here.
+    key = preview_cache_key(path, recipe, size) + f"|proof|{space}|{warn}"
+    digest = hashlib.sha1(key.encode()).hexdigest()
+    if request.headers.get("if-none-match"):
+        probe = _image_response(request, b"", key)
+        if probe.status_code == 304:
+            return probe
+
+    cached = lib.cache_dir / f"proof-{digest}.jpg"
+    meta = lib.cache_dir / f"proof-{digest}.oog"
+    if cached.exists() and meta.exists():
+        return _image_response(
+            request, cached.read_bytes(), key,
+            **{"X-Out-Of-Gamut-Percent": meta.read_text()},
+        )
+
     linear = _decode_cache.get(path, half_size=True)
-    rendered = render_float(linear, load_sidecar(path).recipe)
+    rendered = render_float(linear, recipe)
     proofed, oog = convert_from_srgb(rendered, space)
+    # Show the proofed pixels — the whole point of the endpoint. This
+    # previously encoded `rendered`, quietly returning the unproofed image.
+    out = proofed.copy() if warn else proofed
     if warn:
-        rendered = rendered.copy()
-        rendered[oog] = [1.0, 0.0, 1.0]
+        out[oog] = [1.0, 0.0, 1.0]
     from PIL import Image as PILImage
 
-    im = PILImage.fromarray((rendered * 255).round().astype("uint8"))
+    im = PILImage.fromarray((np.clip(out, 0, 1) * 255).round().astype("uint8"))
     im.thumbnail((size, size), PILImage.LANCZOS)
     buf = _io.BytesIO()
     im.save(buf, "JPEG", quality=90)
-    return Response(content=buf.getvalue(), media_type="image/jpeg",
-                    headers={"X-Out-Of-Gamut-Percent": f"{float(oog.mean()) * 100:.3f}"})
+    data = buf.getvalue()
+
+    percent = f"{float(oog.mean()) * 100:.3f}"
+    cached.write_bytes(data)
+    meta.write_text(percent)
+    return _image_response(request, data, key, **{"X-Out-Of-Gamut-Percent": percent})
 
 
 # ---------- ML: enhance (denoise / super-resolution) + faces ----------
@@ -1364,9 +1580,12 @@ def faces_scan(body: FacesScanIn | None = None) -> dict:
     b = body or FacesScanIn()
     ids = b.image_ids or [r["id"] for r in state.db().query("SELECT id FROM images")]
     scanned, with_faces, errors = 0, 0, []
+    paths = _image_paths(ids)  # one query instead of one per image
     for iid in ids:
         try:
-            path = _image_path(iid)
+            path = paths.get(iid)
+            if path is None:
+                raise HTTPException(404, f"unknown image id {iid}")
             img = linear_to_srgb(_decode_cache.get(path, half_size=True))
             faces = ml.detect_faces(img, threshold=b.threshold)
         except ml.MLUnavailable as e:
@@ -1415,7 +1634,11 @@ def _merge(kind: Literal["hdr", "pano"], body: MergeIn) -> dict:
     from viberoom.merge import merge_hdr, merge_pano
 
     lib = state.require_library()
-    paths = [_image_path(iid) for iid in body.image_ids]
+    resolved = _image_paths(body.image_ids)
+    for iid in body.image_ids:
+        if iid not in resolved:
+            raise HTTPException(404, f"unknown image id {iid}")
+    paths = [resolved[iid] for iid in body.image_ids]
     fused = merge_hdr(paths) if kind == "hdr" else merge_pano(paths)
     name = body.out_name or f"{kind}-{paths[0].stem}"
     if not _VERSION_NAME_RE.match(name):

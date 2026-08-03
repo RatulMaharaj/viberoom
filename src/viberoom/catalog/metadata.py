@@ -69,6 +69,30 @@ def _read_exiftool(path: Path) -> tuple[int | None, int | None, dict] | None:
         data = json.loads(out.stdout)[0]
     except Exception:
         return None
+    return _from_exiftool(data)
+
+
+def _read_exiftool_many(
+    paths: list[Path],
+) -> dict[str, tuple[int | None, int | None, dict]] | None:
+    """One exiftool process for many files, keyed by the path we passed in.
+
+    Spawning exiftool per file dominates a cold scan; it happily takes a whole
+    batch of paths per invocation. Returns None if the invocation itself failed,
+    so the caller can retry the files individually."""
+    try:
+        out = subprocess.run(
+            [_EXIFTOOL, "-json", "-n", "-fast2", *[str(p) for p in paths]],
+            capture_output=True, timeout=20 + len(paths), check=True,
+        )
+        data = json.loads(out.stdout)
+    except Exception:
+        return None
+    # exiftool echoes SourceFile verbatim, and skips files it could not read
+    return {str(d.get("SourceFile", "")): _from_exiftool(d) for d in data}
+
+
+def _from_exiftool(data: dict) -> tuple[int | None, int | None, dict]:
     exif: dict = {}
     # normalized summary keys first, then everything else exiftool found
     for tag, key in _EXIFTOOL_MAP.items():
@@ -121,11 +145,7 @@ def _read_pillow(path: Path) -> tuple[int | None, int | None, dict]:
         return None, None, {}
 
 
-def read_metadata(path: Path) -> tuple[int | None, int | None, dict]:
-    if _EXIFTOOL:
-        result = _read_exiftool(path)
-        if result and result[2]:
-            return result
+def _without_exiftool(path: Path) -> tuple[int | None, int | None, dict]:
     result = _read_exifread(path)
     if result and result[2]:
         # exifread rarely knows true pixel dims for RAW; borrow from Pillow if missing
@@ -134,3 +154,35 @@ def read_metadata(path: Path) -> tuple[int | None, int | None, dict]:
             return w, h, result[2]
         return result
     return _read_pillow(path)
+
+
+def read_metadata(path: Path) -> tuple[int | None, int | None, dict]:
+    if _EXIFTOOL:
+        result = _read_exiftool(path)
+        if result and result[2]:
+            return result
+    return _without_exiftool(path)
+
+
+def read_metadata_batch(
+    paths: list[Path], chunk: int = 200
+) -> dict[Path, tuple[int | None, int | None, dict]]:
+    """read_metadata for many files, with exiftool batched across them.
+
+    Per file the outcome is identical to read_metadata — anything exiftool
+    cannot give us still falls through exifread and Pillow."""
+    out: dict[Path, tuple[int | None, int | None, dict]] = {}
+    if _EXIFTOOL:
+        for i in range(0, len(paths), chunk):
+            group = paths[i:i + chunk]
+            batch = _read_exiftool_many(group)
+            for p in group:
+                # a failed batch gets a per-file retry: one unreadable file must
+                # not cost its neighbours their exiftool data
+                res = batch.get(str(p)) if batch is not None else _read_exiftool(p)
+                if res and res[2]:
+                    out[p] = res
+    for p in paths:
+        if p not in out:
+            out[p] = _without_exiftool(p)
+    return out

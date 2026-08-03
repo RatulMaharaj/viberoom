@@ -165,3 +165,123 @@ def test_crop_aspect_auto_matches_orientation(client):
     assert crop["left"] == 0 and crop["right"] == 1
     frac = crop["bottom"] - crop["top"]
     np.testing.assert_allclose(frac, (90 / 1.5) / 60, atol=0.01)
+
+
+# ---------- lens: exactness and buffer safety after the memory rework ----------
+
+def _reference_lens(img, lens):
+    """The obvious whole-frame form of apply_lens, kept as an oracle.
+
+    apply_lens processes the frame in bands and shares one sampling plan
+    between channels; both are supposed to be bit-identical to doing it all at
+    once, and "supposed to" is what a test is for.
+    """
+    h, w = img.shape[:2]
+    cy, cx = (h - 1) / 2, (w - 1) / 2
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    dx, dy = xx - cx, yy - cy
+    # float(), so the radius stays float32 — dividing by the np.float64 that
+    # np.sqrt returns would promote this whole reference to float64 and make it
+    # an oracle for the promotion bug rather than for the banding.
+    r = np.sqrt(dx * dx + dy * dy) / float(np.sqrt(cx * cx + cy * cy))
+    out = img
+    if lens.distortion or lens.caRed or lens.caBlue:
+        k = lens.distortion / 100 * 0.15
+        base = 1.0 + k * r * r if k else 1.0
+        planes = []
+        for i, ca in ((0, lens.caRed), (1, 0.0), (2, lens.caBlue)):
+            scale = base * (1.0 + ca / 100 * 0.001)
+            if np.isscalar(scale) and scale == 1.0:
+                planes.append(out[..., i])
+                continue
+            sx = np.clip(cx + dx * scale, 0, w - 1.001)
+            sy = np.clip(cy + dy * scale, 0, h - 1.001)
+            x0, y0 = sx.astype(np.int32), sy.astype(np.int32)
+            fx = (sx - x0).astype(np.float32)
+            fy = (sy - y0).astype(np.float32)
+            c = out[..., i]
+            top = c[y0, x0] * (1 - fx) + c[y0, x0 + 1] * fx
+            bot = c[y0 + 1, x0] * (1 - fx) + c[y0 + 1, x0 + 1] * fx
+            planes.append((top * (1 - fy) + bot * fy).astype(np.float32))
+        out = np.stack(planes, axis=-1)
+    if lens.vignette:
+        out = out * (1.0 + lens.vignette / 100 * 0.8 * (r * r))[..., None]
+    if lens.defringe.amount:
+        from viberoom.engine.ops.lens import _defringe
+
+        out = _defringe(out, lens.defringe.amount)
+    return np.clip(out, 0, None)
+
+
+LENS_CASES = [
+    Lens(distortion=35, vignette=40),
+    Lens(caRed=60, caBlue=-45, defringe=Defringe(amount=70)),
+    Lens(distortion=-25),
+    Lens(vignette=-70),
+    Lens(distortion=20, caRed=-40, caBlue=40, vignette=55, defringe=Defringe(amount=100)),
+]
+
+
+@pytest.mark.parametrize("lens", LENS_CASES)
+def test_lens_is_bit_identical_to_the_whole_frame_form(lens, monkeypatch):
+    # a band budget this small forces several bands over a 71-row frame, so
+    # the seams between them are actually exercised
+    monkeypatch.setattr("viberoom.engine.ops.lens._BAND_BYTES", 1 << 13)
+    img = np.random.default_rng(3).random((71, 53, 3), dtype=np.float32)
+    got = apply_lens(img, lens)
+    want = _reference_lens(img, lens)
+    assert got.dtype == want.dtype
+    np.testing.assert_array_equal(got, want)
+
+
+@pytest.mark.parametrize("lens", LENS_CASES)
+def test_lens_never_writes_into_a_read_only_input(lens):
+    """apply_lens clips its result in place now; the buffer it clips must be
+    one it allocated, not the read-only decode-cache array."""
+    img = np.random.default_rng(4).random((40, 47, 3), dtype=np.float32)
+    before = img.copy()
+    img.flags.writeable = False
+    apply_lens(img, lens)
+    np.testing.assert_array_equal(img, before)
+
+
+# ---------- geometry: resampling in float rather than through uint8 ----------
+
+def test_rotation_keeps_more_precision_than_8_bits():
+    """The rotate/perspective resample used to round-trip through uint8, which
+    quantized the whole frame to 1/255 steps mid-pipeline."""
+    yy = np.linspace(0.2, 0.8, 96, dtype=np.float32)[:, None]
+    img = np.repeat((yy + np.zeros((1, 96), dtype=np.float32))[..., None], 3, axis=-1)
+    out = apply_geometry(img, Geometry(rotate=7))
+    levels = out[10:-10, 10:-10] * 255
+    assert np.abs(levels - np.round(levels)).max() > 1e-3
+
+
+def test_perspective_keeps_more_precision_than_8_bits():
+    xx = np.linspace(0.1, 0.9, 96, dtype=np.float32)[None, :]
+    img = np.repeat((xx + np.zeros((96, 1), dtype=np.float32))[..., None], 3, axis=-1)
+    out = apply_geometry(img, Geometry(perspective=Perspective(vertical=25)))
+    levels = out[10:-10, 10:-10] * 255
+    assert np.abs(levels - np.round(levels)).max() > 1e-3
+
+
+def test_geometry_resample_stays_in_range_and_float32():
+    img = np.random.default_rng(5).random((64, 80, 3), dtype=np.float32)
+    out = apply_geometry(img, Geometry(rotate=12, perspective=Perspective(horizontal=30)))
+    assert out.dtype == np.float32
+    assert out.min() >= 0.0 and out.max() <= 1.0
+
+
+@pytest.mark.parametrize("lens", LENS_CASES)
+def test_lens_stays_in_the_pipeline_working_precision(lens):
+    """A vignette used to widen the frame to float64, because the radius was
+    divided by the np.float64 that np.sqrt returns and NEP 50 promotes on
+    contact. That cost twice the memory and, worse, made the result fail
+    pipeline._owned(), silently disabling in-place reuse for every op
+    downstream of it."""
+    from viberoom.engine.pipeline import _owned
+
+    img = np.random.default_rng(9).random((40, 47, 3), dtype=np.float32)
+    out = apply_lens(img, lens)
+    assert out.dtype == np.float32
+    assert _owned(out, img), "result must be a buffer later ops can write into"
