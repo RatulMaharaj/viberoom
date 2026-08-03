@@ -131,9 +131,14 @@ or a USB device. Everything else is work someone has not done yet.
 ### Hosting it
 
 The build is a static site — no server, no functions, nothing to run.
-`wrangler.toml` points Cloudflare at the built files; the routing and cache
-rules live in `frontend/public/_redirects` and `_headers`, so they travel with
-the app to any host that reads those formats.
+`wrangler.toml` points Cloudflare at the built files and turns on SPA routing,
+so `/edit/<id>` survives a reload. Cache headers live in
+`frontend/public/_headers`, beside the app, so they travel with it.
+
+On a host without an SPA setting of its own — Netlify, for instance — add
+`/*  /index.html  200` to `frontend/public/_redirects`. Do not ship both:
+Cloudflare serves the shell and the catch-all rule then matches that too,
+which it rejects as an infinite loop.
 
 Leave **Root directory** empty, so the paths below match `wrangler.toml`:
 
