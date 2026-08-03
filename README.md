@@ -92,15 +92,59 @@ into your own folder and its browser-local cache.
   static site, and open tabs get a *"a new version of Viberoom is ready"*
   prompt instead of silently running last month's build.
 
-The Python package stays an optional companion. Install it when you want the
-things a browser cannot do on its own: the Claude Code sidebar, the MCP server,
-the REST API, and the benchmark suite.
+### What works in the browser
 
-To host it yourself, build with `VITE_BASE` set to the path it will be served
-from (`/` for the FastAPI mount, `/viberoom/` for GitHub Pages):
+Browsing, rating, flagging, EXIF filtering and sorting, RAW decode and
+thumbnails, the whole develop panel, crop and straighten, and export to JPEG or
+PNG. The GPU renders tone, colour, HSL, grading, blurs, clarity, dehaze, lens
+corrections, geometry, LUTs and masks — checked against the Python engine at
+the float32 noise floor across 89 parity cases.
+
+RAW decoding matches the desktop app closely: Apple DNG differs by 1 part in
+65535, Canon CR3, Sony ARW and Nikon NEF by around a hundredth of that.
+
+### What needs the Python package
+
+Some of this is a browser limit; most of it is simply unbuilt. The app never
+guesses — a photo whose edits it cannot draw shows the original with a badge,
+and **export refuses by name and reason** rather than writing a file missing
+your edits.
+
+| | Why | Could the browser do it? |
+|---|---|---|
+| Claude Code sidebar | A page cannot start a process | **No.** Use WebMCP with a browser agent, or `viberoom-mcp` |
+| Tethered capture | Needs USB and a camera SDK | **No** |
+| X3F (Sigma Foveon) | Absent from the WebAssembly LibRaw build | Yes, with a rebuilt binary |
+| Retouch (heal/clone) | Per-spot work, sequentially dependent | Yes, but it is a real project |
+| AI subject masks | Needs a segmentation network | Yes, via onnxruntime-web |
+| Auto-adjust | Histogram analysis, currently in Python | Yes — a port, not a rewrite |
+| Grain, sharpening, defringe | Unported shader work; defringe needs a whole-frame reduction | Yes, defringe least easily |
+| 16-bit PNG, TIFF, ICC profiles | Unbuilt encoders | Yes |
+| Watermarks, output sharpening | Unbuilt | Yes |
+| Collections, stacks, duplicates | Catalog features, no browser store yet | Yes |
+| Face detection, HDR/pano merge | Server-side compute | Yes, with more wasm |
+
+The short version: the only permanent limits are the ones that need a process
+or a USB device. Everything else is work someone has not done yet.
+
+### Hosting it
+
+The build is a static site — no server, no functions, nothing to run.
+`wrangler.toml` configures Cloudflare Pages; the routing and cache rules live
+in `frontend/public/_redirects` and `_headers`, so they travel with the app to
+any host that reads those formats.
+
+| Setting | Value |
+|---|---|
+| Root directory | `frontend` |
+| Build command | `npm ci && npm run build` |
+| Output directory | `dist` |
+
+Only a subpath deploy needs `VITE_BASE` — `/` is the default and is what a
+domain root wants:
 
 ```bash
-VITE_BASE=/viberoom/ npm --prefix frontend run build
+VITE_BASE=/viberoom/ npm --prefix frontend run build   # e.g. GitHub Pages
 ```
 
 ## Let an agent drive
