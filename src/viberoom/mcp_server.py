@@ -197,11 +197,62 @@ def reset_recipe(image_id: str) -> dict:
 
 
 @mcp.tool()
-def render_preview(image_id: str, size: int = 1024) -> MCPImage:
+def render_preview(image_id: str, size: int = 1024, variant: str | None = None) -> MCPImage:
     """Render the image WITH its current edits applied and return the JPEG so
-    you can visually inspect the result. size = longest edge in px (256-4096)."""
-    data = _call("GET", f"/images/{image_id}/preview", params={"size": size}).content
+    you can visually inspect the result. size = longest edge in px (256-4096).
+    variant renders a virtual copy's recipe instead of the main one."""
+    params: dict = {"size": size}
+    if variant:
+        params["variant"] = variant
+    data = _call("GET", f"/images/{image_id}/preview", params=params).content
     return MCPImage(data=data, format="jpeg")
+
+
+@mcp.tool()
+def get_history(image_id: str) -> dict:
+    """Edit history (index + timestamp per superseded recipe, oldest first)
+    plus snapshot and variant names for an image."""
+    return _call("GET", f"/images/{image_id}/history").json()
+
+
+@mcp.tool()
+def restore_history(image_id: str, index: int) -> dict:
+    """Restore a history entry as the current recipe. The replaced recipe is
+    pushed to history itself, so this is always undoable."""
+    return _call("POST", f"/images/{image_id}/history/{index}/restore").json()
+
+
+@mcp.tool()
+def snapshot(
+    image_id: str, action: Literal["save", "restore", "delete"], name: str
+) -> dict:
+    """Named point-in-time saves of an image's recipe. 'save' stores the
+    current recipe under the name; 'restore' makes that snapshot current;
+    'delete' removes it. List names via get_history."""
+    if action == "save":
+        return _call("PUT", f"/images/{image_id}/snapshots/{name}").json()
+    if action == "restore":
+        return _call("POST", f"/images/{image_id}/snapshots/{name}/restore").json()
+    return _call("DELETE", f"/images/{image_id}/snapshots/{name}").json()
+
+
+@mcp.tool()
+def variant(
+    image_id: str,
+    action: Literal["save", "delete", "promote"],
+    name: str,
+    recipe: dict | None = None,
+) -> dict:
+    """Virtual copies: independent named recipes for one image, renderable
+    (render_preview variant=...) and exportable (export_image variant=...)
+    side by side. 'save' creates/updates a variant (from `recipe`, or a copy
+    of the current recipe if omitted); 'promote' makes it the main recipe;
+    'delete' removes it. List names via get_history."""
+    if action == "save":
+        return _call("PUT", f"/images/{image_id}/variants/{name}", json={"recipe": recipe}).json()
+    if action == "promote":
+        return _call("POST", f"/images/{image_id}/variants/{name}/promote").json()
+    return _call("DELETE", f"/images/{image_id}/variants/{name}").json()
 
 
 @mcp.tool()
@@ -211,13 +262,15 @@ def export_image(
     quality: int = 90,
     bit_depth: Literal[8, 16] = 8,
     max_dimension: int | None = None,
+    variant: str | None = None,
     path: str | None = None,
 ) -> dict:
     """Export the edited image in sRGB. quality 1-100 (JPEG); bit_depth 16 is
-    PNG-only; max_dimension resizes the longest edge; path overrides the
-    default <library>/exports/ destination. Returns the written file path."""
+    PNG-only; max_dimension resizes the longest edge; variant exports a
+    virtual copy's recipe; path overrides the default <library>/exports/
+    destination. Returns the written file path."""
     body = {"format": format, "quality": quality, "bit_depth": bit_depth,
-            "max_dimension": max_dimension, "path": path}
+            "max_dimension": max_dimension, "variant": variant, "path": path}
     return _call("POST", f"/images/{image_id}/export", json=body).json()
 
 

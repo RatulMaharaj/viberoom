@@ -21,6 +21,15 @@ SIDECAR_SUFFIX = ".vibe.json"
 Flag = Literal["pick", "reject"] | None
 Label = Literal["red", "yellow", "green", "blue", "purple"] | None
 
+HISTORY_CAP = 40
+
+
+class HistoryEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    at: str  # ISO-8601 local timestamp of when this recipe was *replaced*
+    recipe: Recipe
+
 
 class Sidecar(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -31,6 +40,21 @@ class Sidecar(BaseModel):
     label: Label = None
     keywords: list[str] = Field(default_factory=list)
     recipe: Recipe = Field(default_factory=Recipe)
+    # named point-in-time saves of the recipe (restorable)
+    snapshots: dict[str, Recipe] = Field(default_factory=dict)
+    # virtual copies: independent recipes renderable/exportable side by side
+    variants: dict[str, Recipe] = Field(default_factory=dict)
+    # rolling log of superseded recipes, oldest first, capped at HISTORY_CAP
+    history: list[HistoryEntry] = Field(default_factory=list)
+
+
+def push_history(sidecar: Sidecar, at: str) -> None:
+    """Record the sidecar's current recipe into history (call before
+    replacing it). No-op if the recipe matches the latest entry."""
+    if sidecar.history and sidecar.history[-1].recipe == sidecar.recipe:
+        return
+    sidecar.history.append(HistoryEntry(at=at, recipe=sidecar.recipe))
+    del sidecar.history[:-HISTORY_CAP]
 
 
 def sidecar_path(image_path: Path) -> Path:

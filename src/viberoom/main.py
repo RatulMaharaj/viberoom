@@ -20,7 +20,14 @@ from viberoom.engine.decode import extract_thumbnail
 from viberoom.export import ExportFormat, default_extension, export_image as export_file
 from viberoom.recipe.merge import deep_merge
 from viberoom.recipe.schema import Crop, Recipe
-from viberoom.recipe.sidecar import Flag, Label, load_sidecar, save_sidecar
+from viberoom.recipe.sidecar import (
+    Flag,
+    Label,
+    Sidecar,
+    load_sidecar,
+    push_history,
+    save_sidecar,
+)
 
 app = FastAPI(title="viberoom", version="0.1.0")
 api = FastAPI(title="viberoom API")
@@ -311,9 +318,17 @@ class KeywordsPatchIn(BaseModel):
     remove: list[str] = Field(default_factory=list)
 
 
+def _now() -> str:
+    from datetime import datetime
+
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
 def _update_sidecar(image_id: str, **updates) -> dict:
     path = _image_path(image_id)
     sc = load_sidecar(path)
+    if "recipe" in updates and updates["recipe"] != sc.recipe:
+        push_history(sc, _now())
     sc = sc.model_copy(update=updates)
     save_sidecar(path, sc)
     state.db().execute(
@@ -446,6 +461,137 @@ def auto_adjust(image_id: str, body: AutoIn | None = None) -> dict:
     return auto.model_dump(mode="json")
 
 
+# ---------- history / snapshots / variants ----------
+
+import re as _re
+
+_VERSION_NAME_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9 _\-]{0,63}$")
+
+
+def _check_version_name(name: str) -> str:
+    if not _VERSION_NAME_RE.match(name):
+        raise HTTPException(422, "names are 1-64 chars: letters, digits, spaces, '-', '_'")
+    return name
+
+
+def _sidecar(image_id: str) -> tuple[Path, Sidecar]:
+    path = _image_path(image_id)
+    return path, load_sidecar(path)
+
+
+@api.get("/images/{image_id}/history")
+def get_history(image_id: str) -> dict:
+    """Edit history (oldest first) plus snapshot and variant names."""
+    _, sc = _sidecar(image_id)
+    return {
+        "entries": [{"index": i, "at": e.at} for i, e in enumerate(sc.history)],
+        "snapshots": sorted(sc.snapshots),
+        "variants": sorted(sc.variants),
+    }
+
+
+@api.get("/images/{image_id}/history/{index}")
+def get_history_entry(image_id: str, index: int) -> dict:
+    _, sc = _sidecar(image_id)
+    if not (0 <= index < len(sc.history)):
+        raise HTTPException(404, f"no history entry {index}")
+    e = sc.history[index]
+    return {"index": index, "at": e.at, "recipe": e.recipe.model_dump(mode="json")}
+
+
+@api.post("/images/{image_id}/history/{index}/restore")
+def restore_history(image_id: str, index: int) -> dict:
+    """Make a history entry the current recipe (the replaced recipe is
+    itself pushed to history, so restores are always undoable)."""
+    _, sc = _sidecar(image_id)
+    if not (0 <= index < len(sc.history)):
+        raise HTTPException(404, f"no history entry {index}")
+    restored = sc.history[index].recipe
+    _update_sidecar(image_id, recipe=restored)
+    return restored.model_dump(mode="json")
+
+
+@api.put("/images/{image_id}/snapshots/{name}")
+def save_snapshot(image_id: str, name: str) -> dict:
+    _check_version_name(name)
+    _, sc = _sidecar(image_id)
+    _update_sidecar(image_id, snapshots={**sc.snapshots, name: sc.recipe})
+    return {"id": image_id, "snapshot": name}
+
+
+@api.post("/images/{image_id}/snapshots/{name}/restore")
+def restore_snapshot(image_id: str, name: str) -> dict:
+    _, sc = _sidecar(image_id)
+    if name not in sc.snapshots:
+        raise HTTPException(404, f"no snapshot named {name!r}")
+    _update_sidecar(image_id, recipe=sc.snapshots[name])
+    return sc.snapshots[name].model_dump(mode="json")
+
+
+@api.delete("/images/{image_id}/snapshots/{name}")
+def delete_snapshot(image_id: str, name: str) -> dict:
+    _, sc = _sidecar(image_id)
+    if name not in sc.snapshots:
+        raise HTTPException(404, f"no snapshot named {name!r}")
+    snaps = dict(sc.snapshots)
+    del snaps[name]
+    _update_sidecar(image_id, snapshots=snaps)
+    return {"deleted": name}
+
+
+class VariantIn(BaseModel):
+    recipe: dict | None = Field(
+        default=None, description="Recipe for the variant; omit to copy the current recipe."
+    )
+
+
+@api.put("/images/{image_id}/variants/{name}")
+def save_variant(image_id: str, name: str, body: VariantIn | None = None) -> dict:
+    """Create/update a virtual copy: an independent recipe renderable and
+    exportable alongside the main one."""
+    _check_version_name(name)
+    _, sc = _sidecar(image_id)
+    if body and body.recipe is not None:
+        try:
+            recipe = Recipe.model_validate(body.recipe)
+        except ValidationError as e:
+            raise HTTPException(422, e.errors(include_url=False))
+    else:
+        recipe = sc.recipe
+    _update_sidecar(image_id, variants={**sc.variants, name: recipe})
+    return {"id": image_id, "variant": name, "recipe": recipe.model_dump(mode="json")}
+
+
+@api.delete("/images/{image_id}/variants/{name}")
+def delete_variant(image_id: str, name: str) -> dict:
+    _, sc = _sidecar(image_id)
+    if name not in sc.variants:
+        raise HTTPException(404, f"no variant named {name!r}")
+    variants = dict(sc.variants)
+    del variants[name]
+    _update_sidecar(image_id, variants=variants)
+    return {"deleted": name}
+
+
+@api.post("/images/{image_id}/variants/{name}/promote")
+def promote_variant(image_id: str, name: str) -> dict:
+    """Make a variant the main recipe (the old main recipe goes to history;
+    the variant entry is kept)."""
+    _, sc = _sidecar(image_id)
+    if name not in sc.variants:
+        raise HTTPException(404, f"no variant named {name!r}")
+    _update_sidecar(image_id, recipe=sc.variants[name])
+    return sc.variants[name].model_dump(mode="json")
+
+
+def _recipe_for_variant(sc: Sidecar, variant: str | None) -> Recipe:
+    if variant is None:
+        return sc.recipe
+    if variant not in sc.variants:
+        raise HTTPException(404, f"no variant named {variant!r}")
+    return sc.variants[variant]
+
+
 # ---------- previews ----------
 
 @api.get("/images/{image_id}/thumbnail")
@@ -468,13 +614,14 @@ def preview(
     size: Annotated[int, Query(ge=256, le=4096)] = 1600,
     original: bool = False,
     nocrop: bool = False,
+    variant: str | None = None,
 ) -> Response:
     """Rendered preview with the recipe applied. original=true renders the
     untouched image (before/after); nocrop=true keeps all edits but shows the
-    full frame (for the crop tool)."""
+    full frame (for the crop tool); variant renders a virtual copy's recipe."""
     lib = state.require_library()
     path = _image_path(image_id)
-    recipe = Recipe() if original else load_sidecar(path).recipe
+    recipe = Recipe() if original else _recipe_for_variant(load_sidecar(path), variant)
     if nocrop:
         recipe = recipe.model_copy(deep=True)
         recipe.geometry.crop = Crop()
@@ -489,6 +636,7 @@ class ExportIn(BaseModel):
     quality: int = Field(default=90, ge=1, le=100, description="JPEG only.")
     bit_depth: Literal[8, 16] = Field(default=8, description="16 is PNG only.")
     max_dimension: int | None = Field(default=None, ge=64, le=20000)
+    variant: str | None = Field(default=None, description="Export a virtual copy's recipe.")
     path: str | None = None
 
 
@@ -497,11 +645,12 @@ def _export_one(image_id: str, body: ExportIn) -> dict:
     src = _image_path(image_id)
     if body.bit_depth == 16 and body.format != "png":
         raise HTTPException(422, "bit_depth 16 is only supported for png")
-    recipe = load_sidecar(src).recipe
+    recipe = _recipe_for_variant(load_sidecar(src), body.variant)
+    suffix = f"-{body.variant}" if body.variant else ""
     out = (
         Path(body.path).expanduser()
         if body.path
-        else lib.exports_dir / (src.stem + default_extension(body.format))
+        else lib.exports_dir / (src.stem + suffix + default_extension(body.format))
     )
     result = export_file(
         src, recipe, out, body.format,
