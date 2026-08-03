@@ -25,6 +25,7 @@ ml = [
 [project.scripts]
 viberoom = "viberoom:main"
 viberoom-mcp = "viberoom.mcp_server:main"
+viberoom-bench = "viberoom.bench.cli:main"
 
 [build-system]
 requires = ["hatchling"]

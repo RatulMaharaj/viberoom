@@ -157,6 +157,83 @@ not a clone.
 Develop presets are named recipe merge-patches stored in `~/.viberoom/presets/`,
 shared across libraries.
 
+## Benchmarks
+
+`viberoom-bench` scores the render pipeline. Layers, cheapest first.
+
+**Test pack & lab** — a 7-file, ~260 MB, all-CC0 RAW set from raw.pixls.us,
+chosen by decoder shape rather than subject: X-Trans, Foveon, CRAW, 12-bit
+NEF, ORF, and a phone DNG. Checksummed, so a truncated download is caught
+instead of silently skewing results.
+
+```bash
+uv run viberoom-bench pack            # download (~260 MB)
+uv run viberoom-bench pack --verify   # checksum + decode every file
+uv run viberoom-bench lab             # build ~/Pictures/viberoom-lab to open in the UI
+```
+
+`lab` symlinks the pack into a folder alongside a pixel-exact ColorChecker
+and a gradient, so sidecars land there and the pack stays pristine.
+
+**Compare** — render the same RAW through viberoom and other software.
+
+```bash
+uv run viberoom-bench compare --against libraw darktable
+```
+
+The two comparisons mean different things and should not be conflated:
+
+- **libraw** (`dcraw_emu`) is an *oracle*. viberoom decodes through LibRaw, so
+  a no-op render must match LibRaw's neutral output. Bayer sensors land at
+  53–55 dB PSNR / dE 0.3–0.4, which is the correctness check on the decode
+  path. X-Trans (~32 dB) and ORF (~41 dB) diverge more; this was traced to
+  rawpy's `use_camera_wb` and dcraw_emu's `-w` resolving camera white balance
+  differently *inside LibRaw* — independent of demosaic, gamma, colour matrix
+  and explicit multipliers. It is not a viberoom bug, and the tests pin it so
+  a real regression still surfaces.
+- **darktable** is a *reference*, not an oracle. It applies its own
+  scene-referred workflow by default, so dE 5–14 against a no-op viberoom
+  render is a difference in rendering philosophy, not an error. It answers
+  "are we in the same neighbourhood as a mature processor", nothing more.
+
+**Regression** — synthetic scenes through 26 fixed recipes, compared to a
+checked-in baseline. No downloads, runs in well under a second, and catches
+sub-visible drift (a 0.5% exposure change fails it). This is the CI gate.
+
+```bash
+uv run viberoom-bench regress            # check
+uv run viberoom-bench regress --update   # re-baseline after an intended change
+```
+
+Re-baselining is a deliberate act: read the reported drift first, then commit
+`tests/data/bench_baseline.json` in the same change as the code.
+
+**Chart** — 24 ColorChecker patches scored as mean dE2000. The fastest way to
+catch a white-balance or color-matrix bug; the gray ramp is reported
+separately because it moves first.
+
+```bash
+uv run viberoom-bench chart --recipe my.json --max-delta-e 2.0
+uv run viberoom-bench chart --image chart.cr2 --corners 120,80,980,92,975,690,115,678
+```
+
+**Reference** — renders against expert retouches (FiveK, PPR10K, ...), scored
+with PSNR / SSIM / dE2000. Pair by filename stem; unmatched or undecodable
+files are skipped, not fatal.
+
+```bash
+uv run viberoom-bench reference --inputs raw/ --references expertC/ \
+    --strategy auto --limit 200 --json report.json
+```
+
+Strategies are `noop` (what does a bare decode score?), `auto`
+(`compute_auto_recipe`), and `fixed:<recipe.json>`. Compare `auto` against
+`noop` — if auto isn't beating a bare decode, it's making things worse.
+
+`uv run viberoom-bench datasets` lists the known benchmarks, what each one
+actually tests, and where to get it. None are downloaded automatically; they
+are large and most require accepting terms on the host's site.
+
 ## Development
 
 ```bash
