@@ -1,16 +1,23 @@
 """Tests for presence, color grading, RGB curves, effects and local masks."""
 
 import numpy as np
+import pytest
 
 from viberoom.engine.ops.color import apply_color_grading
-from viberoom.engine.ops.effects import apply_grain, apply_vignette
+from viberoom.engine.ops.effects import apply_effects, apply_grain, apply_vignette
 from viberoom.engine.ops.masks import apply_masks, mask_weight
-from viberoom.engine.ops.presence import apply_clarity, apply_dehaze, apply_texture
+from viberoom.engine.ops.presence import (
+    apply_clarity,
+    apply_dehaze,
+    apply_presence,
+    apply_texture,
+)
 from viberoom.engine.ops.tone import apply_tone_curve
 from viberoom.engine.pipeline import render
 from viberoom.recipe.schema import (
     ColorGrading,
     ColorRangeMask,
+    Effects,
     Grain,
     GradeBand,
     LinearGradientMask,
@@ -455,3 +462,155 @@ def test_apply_masks_does_not_mutate_a_read_only_input():
         ],
     )
     np.testing.assert_array_equal(img, before)
+
+
+# ---------- in-place reworks: exactness and buffer safety ----------
+
+def _reference_vignette(img, vig):
+    """Whole-frame form of apply_vignette, as an oracle for the in-place one."""
+    if vig.amount == 0:
+        return img
+    h, w = img.shape[:2]
+    yy = (np.arange(h, dtype=np.float32) + 0.5) / h * 2 - 1
+    xx = (np.arange(w, dtype=np.float32) + 0.5) / w * 2 - 1
+    p = 2.0 * 2.0 ** (vig.roundness / 100)
+    d = (np.abs(yy[:, None]) ** p + np.abs(xx[None, :]) ** p) ** (1 / p)
+    d = d / np.sqrt(2)
+    start = vig.midpoint / 100
+    t = np.clip((d - start) / max(0.05 + vig.feather / 100 * 0.9, 1e-6), 0, 1)
+    factor = 1.0 + (vig.amount / 100) * (t * t * (3 - 2 * t))
+    return np.clip(np.clip(img, 0, 1) * factor[..., None], 0, 1)
+
+
+def _reference_grain(img, grain):
+    """Whole-frame form of apply_grain. The seed is derived from (h, w) so the
+    pattern must be identical however the noise is generated."""
+    from viberoom.engine.ops.blur import fast_blur
+
+    if grain.amount == 0:
+        return img
+    h, w = img.shape[:2]
+    rng = np.random.default_rng(h * 73_856_093 ^ w * 19_349_663)
+    noise = rng.standard_normal((h, w)).astype(np.float32)
+    sigma = grain.size / 100 * min(h, w) / 500
+    if grain.size > 0 and sigma >= 0.6:
+        noise = fast_blur(noise, sigma)
+        std = noise.std()
+        if std > 1e-6:
+            noise /= std
+    x = np.clip(img, 0, 1)
+    luma = x[..., 0] * 0.2126 + x[..., 1] * 0.7152 + x[..., 2] * 0.0722
+    damp = 0.3 + 0.7 * (1.0 - np.abs(2 * luma - 1) ** 2)
+    return np.clip(x + (noise * damp * grain.amount / 100 * 0.08)[..., None], 0, 1)
+
+
+def _reference_presence(img, texture, clarity, dehaze):
+    """Whole-frame form of the three presence ops chained."""
+    from viberoom.engine.ops.blur import fast_blur
+
+    def luma(a):
+        return a[..., 0] * 0.2126 + a[..., 1] * 0.7152 + a[..., 2] * 0.0722
+
+    x = img
+    if dehaze:
+        y = np.clip(x, 0, 1)
+        veil = fast_blur(y.min(axis=-1), max(4.0, min(y.shape[0], y.shape[1]) * 0.02))
+        t = dehaze / 100
+        if t > 0:
+            s = 0.7 * t * veil
+            z = (y - s[..., None]) / np.maximum(1.0 - s, 0.2)[..., None]
+            gray = luma(z)[..., None]
+            z = gray + (z - gray) * (1.0 + 0.25 * t)
+        else:
+            s = 0.5 * (-t) * (0.4 + 0.6 * veil)
+            z = y + s[..., None] * (0.85 - y)
+        x = np.clip(z, 0, 1)
+    if clarity:
+        y = np.clip(x, 0, 1)
+        lu = luma(y)
+        high = lu - fast_blur(lu, max(2.0, min(y.shape[0], y.shape[1]) * 0.015))
+        mid = 1.0 - np.abs(2.0 * lu - 1.0) ** 2
+        x = np.clip(y + (clarity / 100 * 0.7 * high * mid)[..., None], 0, 1)
+    if texture:
+        y = np.clip(x, 0, 1)
+        lu = luma(y)
+        high = lu - fast_blur(lu, max(1.0, min(y.shape[0], y.shape[1]) / 1000))
+        x = np.clip(y + (texture / 100 * 0.8 * high)[..., None], 0, 1)
+    return x
+
+
+EFFECT_CASES = [
+    (Vignette(amount=-45, midpoint=40, feather=60, roundness=20), Grain(amount=35, size=40)),
+    (Vignette(amount=70, midpoint=0, feather=100, roundness=-100), Grain()),
+    (Vignette(), Grain(amount=100, size=0)),
+    (Vignette(amount=-20), Grain(amount=60, size=4)),
+]
+
+
+@pytest.mark.parametrize("vig,grain", EFFECT_CASES)
+def test_effects_are_bit_identical_to_the_whole_frame_form(vig, grain):
+    img = np.random.default_rng(21).random((90, 71, 3), dtype=np.float32)
+    want = _reference_grain(_reference_vignette(img, vig), grain)
+    got = apply_effects(img, Effects(vignette=vig, grain=grain))
+    assert got.dtype == want.dtype
+    np.testing.assert_array_equal(got, want)
+
+
+@pytest.mark.parametrize("texture,clarity,dehaze", [(30, 55, 0), (0, 0, 40), (0, 0, -40), (-50, -25, 35)])
+def test_presence_is_bit_identical_to_the_whole_frame_form(texture, clarity, dehaze):
+    img = np.random.default_rng(22).random((90, 71, 3), dtype=np.float32)
+    got = apply_presence(img, texture, clarity, dehaze)
+    np.testing.assert_array_equal(got, _reference_presence(img, texture, clarity, dehaze))
+
+
+def test_presence_out_buffer_is_written_in_place():
+    """The `out` hand-off is what stops three chained presence ops from making
+    three defensive copies of the frame."""
+    img = np.random.default_rng(23).random((40, 40, 3), dtype=np.float32)
+    scratch = np.empty_like(img)
+    got = apply_texture(img, 40, out=scratch)
+    assert got is scratch
+    np.testing.assert_array_equal(got, apply_texture(img, 40))
+
+
+def test_grain_out_buffer_is_written_in_place():
+    img = np.random.default_rng(24).random((40, 40, 3), dtype=np.float32)
+    scratch = np.empty_like(img)
+    got = apply_grain(img, Grain(amount=50, size=30), out=scratch)
+    assert got is scratch
+    np.testing.assert_array_equal(got, apply_grain(img, Grain(amount=50, size=30)))
+
+
+@pytest.mark.parametrize(
+    "op",
+    [
+        lambda x: apply_effects(x, Effects(vignette=Vignette(amount=-40), grain=Grain(amount=30))),
+        lambda x: apply_presence(x, 40, -30, 25),
+        lambda x: apply_presence(x, 0, 0, -25),
+        lambda x: apply_clarity(x, 30),
+        lambda x: apply_dehaze(x, 30),
+        lambda x: apply_texture(x, 30),
+    ],
+)
+def test_in_place_ops_never_write_into_a_read_only_input(op):
+    img = np.random.default_rng(25).random((36, 44, 3), dtype=np.float32)
+    before = img.copy()
+    img.flags.writeable = False
+    op(img)
+    np.testing.assert_array_equal(img, before)
+
+
+def test_retouch_never_writes_into_a_read_only_input():
+    """apply_retouch drops the redundant copy after np.clip; np.clip's result
+    must therefore really be a buffer of its own."""
+    from viberoom.engine.ops.retouch import apply_retouch
+    from viberoom.recipe.schema import RetouchSpot
+
+    img = np.random.default_rng(26).random((48, 48, 3), dtype=np.float32)
+    before = img.copy()
+    img.flags.writeable = False
+    out = apply_retouch(
+        img, [RetouchSpot(mode="heal", source=(0.2, 0.2), dest=(0.7, 0.7), radius=0.15)]
+    )
+    np.testing.assert_array_equal(img, before)
+    assert not np.array_equal(out, before)  # the spot really was applied

@@ -1,5 +1,5 @@
-"""Geometry: orientation, straighten rotation, flips, crop. Runs last, on
-display-space uint8-ready arrays (via PIL for interpolated rotation)."""
+"""Geometry: orientation, straighten rotation, flips, crop. Runs in display
+space, resampling through PIL for the interpolated rotate/perspective."""
 
 from __future__ import annotations
 
@@ -20,6 +20,27 @@ def _find_coeffs(dst_quad, src_quad):
     return np.linalg.solve(np.array(a, dtype=np.float64), b)
 
 
+def _resample(img: np.ndarray, fn) -> np.ndarray:
+    """Run a PIL geometric transform on each channel, in float.
+
+    This used to round-trip through uint8, which quantized to 8 bits in the
+    middle of the pipeline: a 16-bit export inherited preview-grade banding
+    purely because the recipe happened to include a straighten. PIL's float
+    mode is single-channel, so the channels go one at a time — the same trick
+    `cache._downscale_linear` uses for resizing.
+    """
+    out = None
+    for c in range(img.shape[2]):
+        plane = Image.fromarray(np.ascontiguousarray(img[..., c], dtype=np.float32), mode="F")
+        res = np.asarray(fn(plane), dtype=np.float32)
+        if out is None:
+            out = np.empty((*res.shape, img.shape[2]), dtype=np.float32)
+        out[..., c] = res
+    # Bicubic overshoots at hard edges, and the uint8 path this replaces
+    # clamped as a side effect of its own conversion; keep that contract.
+    return np.clip(out, 0, 1, out=out)
+
+
 def _apply_perspective(out: np.ndarray, persp) -> np.ndarray:
     h, w = out.shape[:2]
     v = persp.vertical / 100 * 0.35
@@ -38,10 +59,10 @@ def _apply_perspective(out: np.ndarray, persp) -> np.ndarray:
     cxp, cyp = w / 2, h / 2
     src_quad = [((x - cxp) * s + cxp, (y - cyp) * s + cyp) for x, y in src_quad]
     dst_quad = [(0, 0), (w, 0), (w, h), (0, h)]
-    coeffs = _find_coeffs(dst_quad, src_quad)
-    im = Image.fromarray((np.clip(out, 0, 1) * 255).astype(np.uint8))
-    im = im.transform((w, h), Image.PERSPECTIVE, tuple(coeffs), resample=Image.BICUBIC)
-    return np.asarray(im, dtype=np.float32) / 255.0
+    coeffs = tuple(_find_coeffs(dst_quad, src_quad))
+    return _resample(
+        out, lambda p: p.transform((w, h), Image.PERSPECTIVE, coeffs, resample=Image.BICUBIC)
+    )
 
 
 def apply_geometry(img: np.ndarray, geo: Geometry) -> np.ndarray:
@@ -52,9 +73,9 @@ def apply_geometry(img: np.ndarray, geo: Geometry) -> np.ndarray:
     if p.vertical or p.horizontal or p.scale != 100:
         out = _apply_perspective(out, p)
     if geo.rotate:
-        im = Image.fromarray((np.clip(out, 0, 1) * 255).astype(np.uint8))
-        im = im.rotate(-geo.rotate, resample=Image.BICUBIC, expand=False)
-        out = np.asarray(im, dtype=np.float32) / 255.0
+        out = _resample(
+            out, lambda p: p.rotate(-geo.rotate, resample=Image.BICUBIC, expand=False)
+        )
     if geo.flipH:
         out = out[:, ::-1]
     if geo.flipV:
