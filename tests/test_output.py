@@ -203,3 +203,118 @@ def test_pano_merge_wider_than_inputs(client):
     assert r.status_code == 200
     with Image.open(r.json()["path"]) as im:
         assert im.width > 90  # wider than either input
+
+
+def _decode_png16(path):
+    """Decode a filter-0 16-bit RGB PNG back to uint16. Pillow downsamples
+    16-bit RGB to 8-bit on load, so exact round-trip checks need this."""
+    import struct
+    import zlib
+
+    data = path.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    pos, idat, size = 8, b"", None
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos:pos + 4])
+        tag, body = data[pos + 4:pos + 8], data[pos + 8:pos + 8 + length]
+        if tag == b"IHDR":
+            w, h, depth, color = struct.unpack(">IIBB", body[:10])
+            size = (w, h, depth, color)
+        elif tag == b"IDAT":
+            idat += body
+        pos += 12 + length
+    w, h, depth, color = size
+    raw = np.frombuffer(zlib.decompress(idat), np.uint8).reshape(h, 1 + w * 3 * 2)
+    assert not raw[:, 0].any(), "filter bytes must all be 0"
+    px = raw[:, 1:].reshape(h, w * 3, 2).astype(np.uint16)
+    return (px[..., 0] << 8 | px[..., 1]).reshape(h, w, 3), depth, color
+
+
+def test_png16_writer_is_lossless_and_16bit(tmp_path):
+    """The 16-bit PNG writer must round-trip exactly. Values are chosen so a
+    wrong byte order, a dropped filter byte or a row-stride slip all change
+    the decoded pixels rather than merely reordering equal samples."""
+    from viberoom.export import _write_png16
+
+    rng = np.random.default_rng(1234)
+    arr = rng.integers(0, 65536, (37, 53, 3)).astype(np.uint16)
+    # asymmetric byte pairs so >u2 vs <u2 cannot decode the same
+    arr[0, 0] = (0x00FF, 0xFF00, 0x0102)
+    arr[-1, -1] = (0xFFFE, 0x0001, 0x8000)
+
+    out = tmp_path / "sixteen.png"
+    _write_png16(arr, out)
+
+    back, depth, color = _decode_png16(out)
+    assert (depth, color) == (16, 2)
+    assert np.array_equal(back, arr)
+
+    # and it is a PNG real decoders accept, at the right size
+    with Image.open(out) as im:
+        assert im.size == (53, 37)
+        assert im.mode == "RGB"
+
+
+def test_png16_header_declares_depth_16_rgb(tmp_path):
+    """Guards the IHDR itself: Pillow would happily decode an 8-bit file too."""
+    import struct
+
+    from viberoom.export import _write_png16
+
+    out = tmp_path / "hdr.png"
+    _write_png16(np.full((4, 6, 3), 40000, np.uint16), out)
+    data = out.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    assert data[12:16] == b"IHDR"
+    w, h, depth, color = struct.unpack(">IIBB", data[16:26])
+    assert (w, h, depth, color) == (6, 4, 16, 2)
+
+
+def test_png16_chunk_lengths_and_crcs_are_valid(tmp_path):
+    """The IDAT length is back-patched after streaming, so walk every chunk."""
+    import struct
+    import zlib
+
+    from viberoom.export import _write_png16
+
+    out = tmp_path / "chunks.png"
+    rng = np.random.default_rng(7)
+    _write_png16(rng.integers(0, 65536, (64, 96, 3)).astype(np.uint16), out)
+
+    data = out.read_bytes()
+    pos, tags, idat = 8, [], b""
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos:pos + 4])
+        tag = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + length]
+        (crc,) = struct.unpack(">I", data[pos + 8 + length:pos + 12 + length])
+        assert crc == zlib.crc32(tag + body) & 0xFFFFFFFF, tag
+        tags.append(tag)
+        if tag == b"IDAT":
+            idat += body
+        pos += 12 + length
+    assert pos == len(data)
+    assert tags[0] == b"IHDR" and tags[-1] == b"IEND"
+    # every scanline carries filter byte 0 and a full row of samples
+    raw = zlib.decompress(idat)
+    assert len(raw) == 64 * (1 + 96 * 3 * 2)
+    assert set(raw[::1 + 96 * 3 * 2]) == {0}
+
+
+def test_export_png16_matches_the_float_render(tmp_path, client):
+    """End-to-end: what lands on disk is the quantised float render, exactly."""
+    from viberoom.engine.cache import render_full_float
+    from viberoom.export import export_image
+    from viberoom.recipe.schema import Recipe
+
+    _c, lib = client
+    src = lib / "sixteen_src.jpg"
+    g = np.linspace(0, 1, 61)[None, :, None].repeat(43, 0).repeat(3, 2)
+    Image.fromarray((g * 255).astype(np.uint8)).save(src, quality=95)
+
+    recipe = Recipe()
+    out = export_image(src, recipe, tmp_path / "out.png", "png", bit_depth=16)
+    expected = (render_full_float(src, recipe) * 65535).round().astype(np.uint16)
+    back, depth, _color = _decode_png16(out)
+    assert depth == 16
+    assert np.array_equal(back, expected)
