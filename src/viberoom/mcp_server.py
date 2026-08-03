@@ -86,6 +86,8 @@ def list_images(
     q: str | None = None,
     folder: str | None = None,
     has_edits: bool | None = None,
+    has_gps: bool | None = None,
+    faces_gte: int | None = None,
     collection: str | None = None,
     stacks: Literal["collapse"] | None = None,
     sort: Literal["filename", "mtime", "rating", "taken_at"] = "filename",
@@ -106,7 +108,8 @@ def list_images(
         "rating_gte": rating_gte, "flag": flag, "label": label, "keyword": keyword,
         "camera": camera, "lens": lens, "iso_gte": iso_gte, "iso_lte": iso_lte,
         "taken_after": taken_after, "taken_before": taken_before, "q": q,
-        "folder": folder, "has_edits": has_edits, "collection": collection,
+        "folder": folder, "has_edits": has_edits, "has_gps": has_gps,
+        "faces_gte": faces_gte, "collection": collection,
         "stacks": stacks, "sort": sort, "order": order,
         "limit": limit, "offset": offset,
     }.items() if v is not None}
@@ -283,6 +286,8 @@ def update_recipe(image_id: str, patch: dict) -> dict:
              {type: 'color', hue: 0-360, range: 5-180}
              {type: 'brush', strokes: [{points: [[x,y],...], radius: 0-0.5
               (fraction of short side), feather/flow: 0-100, erase: bool}]}
+             {type: 'subject'|'background'|'sky'} — content-aware AI masks
+              (render_preview to inspect the result)
     - retouch: heal/clone spots, list of {mode: 'heal'|'clone', source: [x,y],
              dest: [x,y], radius: 0-0.25 (fraction of short side),
              feather/opacity: 0-100}. Same post-crop coordinates as masks.
@@ -475,6 +480,54 @@ def soft_proof(
     data = _call("GET", f"/images/{image_id}/proof",
                  params={"space": space, "warn": warn, "size": size}).content
     return MCPImage(data=data, format="jpeg")
+
+
+@mcp.tool()
+def tether(action: Literal["status", "capture"] = "status",
+           subfolder: str = "tethered", prefix: str = "tether",
+           preset: str | None = None, keywords: list[str] | None = None) -> dict:
+    """Tethered capture via a USB-connected camera (needs gphoto2 installed).
+    'status' reports the connected camera; 'capture' triggers the shutter,
+    imports the frame into <library>/<subfolder>, applies preset/keywords,
+    and returns the new image id (render_preview it to check the shot)."""
+    if action == "status":
+        return _call("GET", "/tether").json()
+    body = {"subfolder": subfolder, "prefix": prefix, "preset": preset,
+            "keywords": keywords or []}
+    return _call("POST", "/tether/capture", json=body).json()
+
+
+@mcp.tool()
+def enhance_image(image_id: str, model: str, tile: int = 512) -> dict:
+    """Run an image-to-image ONNX model (denoise, super-resolution) from
+    ~/.viberoom/models over the original, tiled; the result joins the
+    library as a new 16-bit PNG with the recipe copied. See GET /models for
+    installed models. Needs the ml extra (onnxruntime)."""
+    return _call("POST", f"/images/{image_id}/enhance",
+                 json={"model": model, "tile": tile}).json()
+
+
+@mcp.tool()
+def scan_faces(image_ids: list[str] | None = None, threshold: float = 0.7,
+               setup: bool = False) -> dict:
+    """Detect faces (UltraFace via onnxruntime). setup=true first downloads
+    the small detector model. After scanning, filter with
+    list_images(faces_gte=1). Needs the ml extra."""
+    if setup:
+        _call("POST", "/faces/setup")
+    body = {"image_ids": image_ids, "threshold": threshold}
+    return _call("POST", "/faces/scan", json=body).json()
+
+
+@mcp.tool()
+def map_points(lat_min: float = -90, lat_max: float = 90,
+               lon_min: float = -180, lon_max: float = 180) -> dict:
+    """GPS points for geotagged images (optionally within a bounding box).
+    Also: list_images(has_gps=true)."""
+    return _call("GET", "/map", params={
+        "lat_min": lat_min, "lat_max": lat_max,
+        "lon_min": lon_min, "lon_max": lon_max,
+    }).json()
 
 
 @mcp.tool()

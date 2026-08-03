@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 from viberoom.catalog.db import CatalogDB
@@ -26,6 +27,42 @@ def _num(v: str | None) -> float | None:
         return None
 
 
+def _parse_gps(exif: dict) -> tuple[float | None, float | None]:
+    """GPS decimal degrees from either exiftool numeric values or
+    exifread-style '[d, m, s]' rational strings with N/S/E/W refs."""
+
+    def one(value, ref) -> float | None:
+        if value is None:
+            return None
+        try:
+            deg = float(value)
+        except (TypeError, ValueError):
+            parts = re.findall(r"[\d/.]+", str(value))
+            if not parts:
+                return None
+            def frac(s: str) -> float:
+                if "/" in s:
+                    a, b = s.split("/")
+                    return float(a) / (float(b) or 1)
+                return float(s)
+            try:
+                nums = [frac(p) for p in parts[:3]]
+            except (ValueError, ZeroDivisionError):
+                return None
+            deg = nums[0] + (nums[1] if len(nums) > 1 else 0) / 60 + (
+                nums[2] if len(nums) > 2 else 0
+            ) / 3600
+        if ref and str(ref).strip().upper()[:1] in ("S", "W"):
+            deg = -deg
+        return deg
+
+    lat = one(exif.get("GPSLatitude"), exif.get("GPSLatitudeRef"))
+    lon = one(exif.get("GPSLongitude"), exif.get("GPSLongitudeRef"))
+    if lat is not None and abs(lat) <= 90 and lon is not None and abs(lon) <= 180:
+        return lat, lon
+    return None, None
+
+
 def summarize_exif(exif: dict) -> dict:
     """Derive the filterable summary columns from a raw EXIF dict."""
     make, model = exif.get("Make", "").strip(), exif.get("Model", "").strip()
@@ -40,12 +77,15 @@ def summarize_exif(exif: dict) -> dict:
         parts = str(taken).split(" ", 1)
         date = parts[0].replace(":", "-")
         taken = date + (" " + parts[1] if len(parts) > 1 else "")
+    lat, lon = _parse_gps(exif)
     return {
         "camera": camera or None,
         "lens": exif.get("LensModel") or None,
         "iso": int(iso) if iso else None,
         "focal_length": focal,
         "taken_at": taken,
+        "gps_lat": lat,
+        "gps_lon": lon,
     }
 
 
@@ -92,8 +132,9 @@ def scan(library: Library, db: CatalogDB, full: bool = False) -> dict:
             db.execute(
                 """INSERT INTO images (id, rel_path, filename, ext, is_raw, filesize,
                        mtime, width, height, exif_json, rating, flag, label, keywords_json,
-                       has_edits, sidecar_mtime, camera, lens, iso, focal_length, taken_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       has_edits, sidecar_mtime, camera, lens, iso, focal_length, taken_at,
+                       gps_lat, gps_lon)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET filesize=excluded.filesize,
                        mtime=excluded.mtime, width=excluded.width, height=excluded.height,
                        exif_json=excluded.exif_json, rating=excluded.rating,
@@ -101,13 +142,15 @@ def scan(library: Library, db: CatalogDB, full: bool = False) -> dict:
                        keywords_json=excluded.keywords_json, has_edits=excluded.has_edits,
                        sidecar_mtime=excluded.sidecar_mtime, camera=excluded.camera,
                        lens=excluded.lens, iso=excluded.iso,
-                       focal_length=excluded.focal_length, taken_at=excluded.taken_at""",
+                       focal_length=excluded.focal_length, taken_at=excluded.taken_at,
+                       gps_lat=excluded.gps_lat, gps_lon=excluded.gps_lon""",
                 (
                     iid, rel, name, p.suffix.lower(), int(is_raw(p)), stat.st_size,
                     stat.st_mtime, width, height, json.dumps(exif), sc.rating, sc.flag,
                     sc.label, json.dumps(sc.keywords), int(sc.recipe != Recipe()), sc_mtime,
                     summary["camera"], summary["lens"], summary["iso"],
                     summary["focal_length"], summary["taken_at"],
+                    summary["gps_lat"], summary["gps_lon"],
                 ),
             )
             if row:

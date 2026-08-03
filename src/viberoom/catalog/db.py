@@ -41,6 +41,9 @@ _MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_images_label ON images(label)",
     "CREATE INDEX IF NOT EXISTS idx_images_taken_at ON images(taken_at)",
     "ALTER TABLE images ADD COLUMN stack_id TEXT",
+    "ALTER TABLE images ADD COLUMN gps_lat REAL",
+    "ALTER TABLE images ADD COLUMN gps_lon REAL",
+    "ALTER TABLE images ADD COLUMN faces_json TEXT",
     "ALTER TABLE images ADD COLUMN dhash TEXT",
     "CREATE INDEX IF NOT EXISTS idx_images_stack ON images(stack_id)",
 ]

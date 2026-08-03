@@ -149,6 +149,66 @@ def import_photos(body: ImportIn) -> dict:
     return {**result, "library_total": scan_result["total"]}
 
 
+# ---------- tethered capture ----------
+
+class TetherCaptureIn(BaseModel):
+    subfolder: str = Field(default="tethered", description="Library subfolder for captures.")
+    prefix: str = Field(default="tether", pattern=r"^[a-zA-Z0-9_\-]{1,32}$")
+    preset: str | None = Field(default=None, description="Develop preset applied on capture.")
+    keywords: list[str] = Field(default_factory=list)
+
+
+@api.get("/tether")
+def tether_status() -> dict:
+    """Is a camera connected for tethered capture (via gphoto2)?"""
+    from viberoom import tether
+
+    if tether.GPHOTO2 is None:
+        return {"available": False, "reason": "gphoto2 not installed"}
+    try:
+        cam = tether.detect_camera()
+    except tether.TetherError as e:
+        return {"available": False, "reason": str(e)}
+    return {"available": True, **cam}
+
+
+@api.post("/tether/capture")
+def tether_capture(body: TetherCaptureIn | None = None) -> dict:
+    """Trigger the shutter, download the frame into the library, scan it,
+    and optionally apply a preset/keywords. Returns the new image id."""
+    from viberoom import tether
+
+    lib = state.require_library()
+    b = body or TetherCaptureIn()
+    if ".." in Path(b.subfolder).parts:
+        raise HTTPException(422, "subfolder must stay inside the library")
+    recipe_patch = None
+    if b.preset:
+        try:
+            recipe_patch = preset_store.load_preset(b.preset)
+        except KeyError:
+            raise HTTPException(404, f"no preset named {b.preset!r}")
+    try:
+        path = tether.capture(lib.root / b.subfolder, prefix=b.prefix)
+    except tether.TetherError as e:
+        raise HTTPException(503, str(e))
+
+    if recipe_patch or b.keywords:
+        sc = load_sidecar(path)
+        if b.keywords:
+            sc.keywords = list(dict.fromkeys(sc.keywords + b.keywords))
+        if recipe_patch:
+            sc.recipe = Recipe.model_validate(
+                deep_merge(sc.recipe.model_dump(mode="json"), recipe_patch)
+            )
+        save_sidecar(path, sc)
+    scan(lib, state.db())
+    from viberoom.catalog.scanner import image_id as make_id
+
+    iid = make_id(str(path.relative_to(lib.root)))
+    return {"id": iid, "path": str(path)}
+
+
 # ---------- session: what the user is currently looking at ----------
 
 _current_image: str | None = None
@@ -263,6 +323,8 @@ def _row_to_dict(row) -> dict:
     d = dict(row)
     d["exif"] = json.loads(d.pop("exif_json"))
     d["keywords"] = json.loads(d.pop("keywords_json") or "[]")
+    faces = d.pop("faces_json", None)
+    d["faces"] = len(json.loads(faces)) if faces else None  # None = not scanned
     d["is_raw"] = bool(d["is_raw"])
     d["has_edits"] = bool(d["has_edits"])
     return d
@@ -334,6 +396,11 @@ def _build_where(f: dict) -> tuple[list[str], list]:
     if f.get("has_edits") is not None:
         where.append("has_edits = ?")
         params.append(int(f["has_edits"]))
+    if f.get("has_gps") is not None:
+        where.append("gps_lat IS NOT NULL" if f["has_gps"] else "gps_lat IS NULL")
+    if f.get("faces_gte") is not None:
+        where.append("faces_json IS NOT NULL AND json_array_length(faces_json) >= ?")
+        params.append(f["faces_gte"])
     return where, params
 
 
@@ -353,6 +420,8 @@ def list_images(
     folder: str | None = None,
     ext: str | None = None,
     has_edits: bool | None = None,
+    has_gps: bool | None = None,
+    faces_gte: Annotated[int | None, Query(ge=0)] = None,
     collection: str | None = None,
     stacks: Literal["collapse"] | None = None,
     sort: Literal["filename", "mtime", "rating", "taken_at"] = "filename",
@@ -373,6 +442,7 @@ def list_images(
         "camera": camera, "lens": lens, "iso_gte": iso_gte, "iso_lte": iso_lte,
         "taken_after": taken_after, "taken_before": taken_before, "q": q,
         "folder": folder, "ext": ext, "has_edits": has_edits,
+        "has_gps": has_gps, "faces_gte": faces_gte,
     })
     if collection is not None:
         try:
@@ -999,6 +1069,125 @@ def soft_proof(
     im.save(buf, "JPEG", quality=90)
     return Response(content=buf.getvalue(), media_type="image/jpeg",
                     headers={"X-Out-Of-Gamut-Percent": f"{float(oog.mean()) * 100:.3f}"})
+
+
+# ---------- ML: enhance (denoise / super-resolution) + faces ----------
+
+class EnhanceIn(BaseModel):
+    model: str = Field(description="An ONNX model name from ~/.viberoom/models (see /models).")
+    tile: int = Field(default=512, ge=128, le=2048)
+
+
+@api.get("/models")
+def list_ml_models() -> dict:
+    from viberoom.ml import MODELS_DIR, list_models
+
+    return {"models": list_models(), "dir": str(MODELS_DIR)}
+
+
+@api.post("/images/{image_id}/enhance")
+def enhance_image(image_id: str, body: EnhanceIn) -> dict:
+    """Run an image-to-image ONNX model (denoise, super-resolution) over the
+    decoded original, tiled; the result joins the library as a 16-bit PNG
+    with the source's recipe copied over (like Lightroom's Denoise DNG)."""
+    from viberoom import ml
+    from viberoom.engine.decode import decode_linear, linear_to_srgb
+    from viberoom.export import _write_png16
+
+    lib = state.require_library()
+    src = _image_path(image_id)
+    try:
+        base = linear_to_srgb(decode_linear(src, half_size=False))
+        result = ml.run_image_model(base, body.model, tile=body.tile)
+    except ml.MLUnavailable as e:
+        raise HTTPException(503, str(e))
+    out = src.with_name(f"{src.stem}-enhanced.png")
+    i = 1
+    while out.exists():
+        out = src.with_name(f"{src.stem}-enhanced-{i}.png")
+        i += 1
+    _write_png16((result * 65535).round().astype("uint16"), out)
+    sc = load_sidecar(src)
+    save_sidecar(out, sc.model_copy(update={"history": [], "snapshots": {}, "variants": {}}))
+    scan(lib, state.db())
+    from viberoom.catalog.scanner import image_id as make_id
+
+    try:
+        rel = str(out.relative_to(lib.root))
+    except ValueError:
+        rel = str(out)  # extra-root files are indexed by absolute path
+    return {"id": make_id(rel), "path": str(out), "scale": result.shape[0] // base.shape[0]}
+
+
+@api.post("/faces/setup")
+def faces_setup() -> dict:
+    """Download the UltraFace detector (~1.2 MB) into ~/.viberoom/models."""
+    from viberoom import ml
+
+    try:
+        ml.get_ort()
+        path = ml.download_ultraface()
+    except ml.MLUnavailable as e:
+        raise HTTPException(503, str(e))
+    except OSError as e:
+        raise HTTPException(502, f"model download failed: {e}")
+    return {"model": str(path)}
+
+
+class FacesScanIn(BaseModel):
+    image_ids: list[str] | None = Field(default=None, description="Default: whole library.")
+    threshold: float = Field(default=0.7, ge=0.1, le=0.99)
+
+
+@api.post("/faces/scan")
+def faces_scan(body: FacesScanIn | None = None) -> dict:
+    """Detect faces and store per-image counts/boxes; then filter with
+    /images?has_faces=true or faces_gte=N."""
+    from viberoom import ml
+    from viberoom.engine.cache import _decode_cache
+    from viberoom.engine.decode import linear_to_srgb
+
+    state.require_library()
+    b = body or FacesScanIn()
+    ids = b.image_ids or [r["id"] for r in state.db().query("SELECT id FROM images")]
+    scanned, with_faces, errors = 0, 0, []
+    for iid in ids:
+        try:
+            path = _image_path(iid)
+            img = linear_to_srgb(_decode_cache.get(path, half_size=True))
+            faces = ml.detect_faces(img, threshold=b.threshold)
+        except ml.MLUnavailable as e:
+            raise HTTPException(503, str(e))
+        except HTTPException as e:
+            errors.append({"id": iid, "error": e.detail})
+            continue
+        except Exception as e:
+            errors.append({"id": iid, "error": str(e)})
+            continue
+        state.db().execute(
+            "UPDATE images SET faces_json=? WHERE id=?", (json.dumps(faces), iid)
+        )
+        scanned += 1
+        with_faces += bool(faces)
+    return {"scanned": scanned, "with_faces": with_faces, "errors": errors}
+
+
+@api.get("/map")
+def map_points(
+    lat_min: float = -90, lat_max: float = 90,
+    lon_min: float = -180, lon_max: float = 180,
+    limit: Annotated[int, Query(ge=1, le=5000)] = 2000,
+) -> dict:
+    """GPS points for all geotagged images (optionally within a bounding
+    box) — the data layer for a map view."""
+    state.require_library()
+    rows = state.db().query(
+        "SELECT id, filename, gps_lat, gps_lon, taken_at, rating FROM images"
+        " WHERE gps_lat IS NOT NULL AND gps_lat BETWEEN ? AND ?"
+        " AND gps_lon BETWEEN ? AND ? LIMIT ?",
+        (lat_min, lat_max, lon_min, lon_max, limit),
+    )
+    return {"points": [dict(r) for r in rows]}
 
 
 # ---------- HDR / panorama merge ----------

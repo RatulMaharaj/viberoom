@@ -13,6 +13,7 @@ from viberoom.engine.ops.blur import fast_blur
 from viberoom.engine.ops.presence import apply_clarity, apply_dehaze
 from viberoom.engine.ops.tone import apply_contrast, apply_regions
 from viberoom.recipe.schema import (
+    AiMask,
     BrushMask,
     BrushStroke,
     ColorRangeMask,
@@ -121,6 +122,10 @@ def mask_weight(mask: Mask, img: np.ndarray) -> np.ndarray:
         weight = lo * (1.0 - hi)
     elif isinstance(mask, BrushMask):
         weight = _brush_weight(mask, h, w)
+    elif isinstance(mask, AiMask):
+        from viberoom.engine.ops.ai_masks import ai_mask_weight
+
+        weight = ai_mask_weight(mask.type, np.clip(img, 0, 1))
     elif isinstance(mask, ColorRangeMask):
         x = np.clip(img, 0, 1)
         maxc, minc = x.max(axis=-1), x.min(axis=-1)

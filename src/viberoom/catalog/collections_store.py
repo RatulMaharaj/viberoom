@@ -16,7 +16,7 @@ _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9 _\-]{0,63}$")
 SMART_KEYS = {
     "rating_gte", "flag", "label", "keyword", "camera", "lens",
     "iso_gte", "iso_lte", "taken_after", "taken_before", "q", "folder",
-    "ext", "has_edits",
+    "ext", "has_edits", "has_gps", "faces_gte",
 }
 
 

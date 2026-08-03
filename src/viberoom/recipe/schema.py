@@ -296,7 +296,18 @@ class BrushMask(MaskBase):
     strokes: list[BrushStroke] = Field(min_length=1)
 
 
-Mask = LinearGradientMask | RadialGradientMask | LuminanceRangeMask | ColorRangeMask | BrushMask
+class AiMask(MaskBase):
+    """Content-aware mask: 'subject' selects the main subject, 'background'
+    its complement, 'sky' the sky region. Uses the best available backend
+    (U2-Net via the optional ml extra, else built-in heuristics)."""
+
+    type: Literal["subject", "background", "sky"]
+
+
+Mask = (
+    LinearGradientMask | RadialGradientMask | LuminanceRangeMask | ColorRangeMask
+    | BrushMask | AiMask
+)
 
 
 class Defringe(StrictModel):
