@@ -2,6 +2,7 @@
 
     viberoom-bench datasets
     viberoom-bench regress [--update]
+    viberoom-bench perf [--update] [--size 3000x2000]
     viberoom-bench chart [--recipe r.json] [--image shot.dng --corners x,y,...]
     viberoom-bench reference --inputs raw/ --references expertC/ --strategy auto
 """
@@ -62,6 +63,83 @@ def cmd_regress(args: argparse.Namespace) -> int:
         print(f"\n{len(drifts)} metric(s) drifted beyond {args.tolerance}", file=sys.stderr)
         return 1
     print(f"{len(current)} cases match baseline")
+    return 0
+
+
+def cmd_perf(args: argparse.Namespace) -> int:
+    from viberoom.bench import perf
+
+    # Defaults live in `perf`, not in the parser, so that importing this module
+    # never pulls in `resource` (which does not exist on Windows).
+    args.baseline = args.baseline or perf.BASELINE_PATH
+    args.repeats = args.repeats or perf.REPEATS
+    args.tolerance = perf.TOLERANCE if args.tolerance is None else args.tolerance
+    args.mem_tolerance = perf.MEM_TOLERANCE if args.mem_tolerance is None else args.mem_tolerance
+
+    try:
+        h, w = perf.DEFAULT_SIZE
+        size = perf.parse_size(args.size) if args.size else (h, w)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    def progress(i: int, n: int, case, sample) -> None:
+        if not args.quiet:
+            print(
+                f"[{i}/{n}] {case.name:<28} {sample.seconds * 1000:8.1f} ms"
+                f"  {sample.peak_mb:7.1f} MB",
+                file=sys.stderr,
+            )
+
+    if args.update:
+        data = perf.write_baseline(
+            args.baseline, size=size, repeats=args.repeats, on_progress=progress
+        )
+        h, w = size
+        print(f"wrote {len(data['cases'])} cases at {w}x{h} to {args.baseline}")
+        return 0
+
+    if not Path(args.baseline).exists():
+        print(f"no baseline at {args.baseline}; run with --update to create it", file=sys.stderr)
+        return 2
+
+    baseline = perf.load_baseline(args.baseline)
+    base_size = tuple(baseline.get("size", list(perf.DEFAULT_SIZE)))
+    if base_size != size:
+        bh, bw = base_size
+        h, w = size
+        print(
+            f"baseline was measured at {bw}x{bh}, not {w}x{h}; "
+            f"pass --size {bw}x{bh} or re-record with --update",
+            file=sys.stderr,
+        )
+        return 2
+
+    current = perf.compute_all(size, repeats=args.repeats, on_progress=progress)
+    drifts, new_cases, stale = perf.compare(
+        current, baseline["cases"], tolerance=args.tolerance, mem_tolerance=args.mem_tolerance
+    )
+    wins = perf.improvements(current, baseline["cases"], threshold=args.tolerance)
+
+    for name in new_cases:
+        print(f"NEW    {name} (not in baseline)")
+    for name in stale:
+        print(f"STALE  {name} (in baseline, no longer a case)")
+    for d in wins:
+        pct = (d.baseline - d.current) / d.baseline * 100
+        print(f"FASTER {d.case}: {d.baseline * 1000:.1f} -> {d.current * 1000:.1f} ms (-{pct:.0f}%)")
+    for d in drifts:
+        pct = (d.current - d.baseline) / d.baseline * 100
+        print(f"SLOWER {d.case}.{d.metric}: {d.baseline:.4f} -> {d.current:.4f} (+{pct:.0f}%)")
+
+    if drifts:
+        print(f"\n{len(drifts)} measurement(s) regressed beyond tolerance", file=sys.stderr)
+        return 1
+    if wins:
+        print(f"\n{len(current)} cases within tolerance; {len(wins)} improved "
+              f"— re-record with --update to lock the win in")
+    else:
+        print(f"{len(current)} cases within tolerance")
     return 0
 
 
@@ -284,6 +362,16 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--baseline", type=Path, default=regression.BASELINE_PATH)
     r.add_argument("--tolerance", type=float, default=regression.TOLERANCE)
     r.set_defaults(func=cmd_regress)
+
+    pf = sub.add_parser("perf", help="time the regression cases at a realistic resolution")
+    pf.add_argument("--update", action="store_true", help="rewrite the baseline instead of checking")
+    pf.add_argument("--baseline", type=Path, default=None)
+    pf.add_argument("--size", default=None, help="WIDTHxHEIGHT to render at (default 3000x2000)")
+    pf.add_argument("--repeats", type=int, default=None, help="timed runs per case; best wins")
+    pf.add_argument("--tolerance", type=float, default=None, help="relative slowdown allowed")
+    pf.add_argument("--mem-tolerance", type=float, default=None, help="relative RSS growth allowed")
+    pf.add_argument("--quiet", action="store_true")
+    pf.set_defaults(func=cmd_perf)
 
     c = sub.add_parser("chart", help="score a ColorChecker through the pipeline")
     c.add_argument("--recipe", help="JSON recipe file to apply before scoring")
