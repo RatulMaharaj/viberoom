@@ -381,15 +381,23 @@ def export_image(
     quality: int = 90,
     bit_depth: Literal[8, 16] = 8,
     max_dimension: int | None = None,
+    color_space: Literal["srgb", "display-p3", "adobe-rgb", "prophoto"] = "srgb",
+    watermark: dict | None = None,
+    output_sharpen: Literal["screen", "matte", "glossy"] | None = None,
     variant: str | None = None,
+    preset: str | None = None,
     path: str | None = None,
 ) -> dict:
-    """Export the edited image in sRGB. quality 1-100 (JPEG); bit_depth 16 is
-    PNG-only; max_dimension resizes the longest edge; variant exports a
-    virtual copy's recipe; path overrides the default <library>/exports/
-    destination. Returns the written file path."""
+    """Export the edited image. quality 1-100 (JPEG); bit_depth 16 is
+    PNG-only; max_dimension resizes the longest edge; color_space embeds the
+    matching ICC profile; watermark: {text|image, position, opacity, scale};
+    output_sharpen tunes for the medium; variant exports a virtual copy;
+    preset applies a saved export preset; path overrides the default
+    <library>/exports/ destination. Returns the written file path."""
     body = {"format": format, "quality": quality, "bit_depth": bit_depth,
-            "max_dimension": max_dimension, "variant": variant, "path": path}
+            "max_dimension": max_dimension, "color_space": color_space,
+            "watermark": watermark, "output_sharpen": output_sharpen,
+            "variant": variant, "preset": preset, "path": path}
     return _call("POST", f"/images/{image_id}/export", json=body).json()
 
 
@@ -423,11 +431,64 @@ def batch_export(
     quality: int = 90,
     bit_depth: Literal[8, 16] = 8,
     max_dimension: int | None = None,
+    color_space: Literal["srgb", "display-p3", "adobe-rgb", "prophoto"] = "srgb",
+    watermark: dict | None = None,
+    output_sharpen: Literal["screen", "matte", "glossy"] | None = None,
+    preset: str | None = None,
+    filename: str | None = None,
 ) -> dict:
-    """Export many images to <library>/exports/ in one call."""
+    """Export many images to <library>/exports/ in one call. filename is a
+    template with {name} {seq} {rating} {date} {ext} (may contain '/');
+    preset applies a saved export preset (explicit fields override);
+    watermark: {text|image, position, opacity, scale, margin}."""
     body = {"image_ids": image_ids, "format": format, "quality": quality,
-            "bit_depth": bit_depth, "max_dimension": max_dimension}
+            "bit_depth": bit_depth, "max_dimension": max_dimension,
+            "color_space": color_space, "watermark": watermark,
+            "output_sharpen": output_sharpen, "preset": preset, "filename": filename}
     return _call("POST", "/batch/export", json=body).json()
+
+
+@mcp.tool()
+def export_presets(
+    action: Literal["list", "save", "delete"] = "list",
+    name: str | None = None,
+    settings: dict | None = None,
+) -> dict:
+    """Named export presets (format, quality, color_space, watermark,
+    output_sharpen, ...) usable via export_image/batch_export preset=name."""
+    if action == "list":
+        return _call("GET", "/export-presets").json()
+    if action == "save":
+        return _call("PUT", f"/export-presets/{name}", json={"settings": settings}).json()
+    return _call("DELETE", f"/export-presets/{name}").json()
+
+
+@mcp.tool()
+def soft_proof(
+    image_id: str,
+    space: Literal["display-p3", "adobe-rgb", "prophoto"] = "display-p3",
+    warn: bool = True,
+    size: int = 1024,
+) -> MCPImage:
+    """Preview how the edited image survives conversion to a target color
+    space; warn=true paints out-of-gamut pixels magenta."""
+    data = _call("GET", f"/images/{image_id}/proof",
+                 params={"space": space, "warn": warn, "size": size}).content
+    return MCPImage(data=data, format="jpeg")
+
+
+@mcp.tool()
+def merge_images(
+    kind: Literal["hdr", "pano"],
+    image_ids: list[str],
+    out_name: str | None = None,
+) -> dict:
+    """Merge 2-12 frames into a new 16-bit PNG that joins the library as a
+    normal image (with its own recipe). 'hdr' exposure-fuses a bracketed
+    set (auto-aligned); 'pano' stitches a left-to-right pan (translation
+    alignment — best for tripod pans). Returns the new image's id."""
+    return _call("POST", f"/merge/{kind}",
+                 json={"image_ids": image_ids, "out_name": out_name}).json()
 
 
 @mcp.tool()

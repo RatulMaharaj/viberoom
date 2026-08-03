@@ -967,18 +967,130 @@ def preview(
     return Response(content=data, media_type="image/jpeg")
 
 
+@api.get("/images/{image_id}/proof")
+def soft_proof(
+    image_id: str,
+    space: Literal["display-p3", "adobe-rgb", "prophoto"] = "display-p3",
+    warn: bool = False,
+    size: Annotated[int, Query(ge=256, le=4096)] = 1600,
+) -> Response:
+    """Soft proof: simulate how the edited image survives conversion to a
+    target color space, rendered back to sRGB for display. warn=true paints
+    out-of-gamut pixels magenta. (The working space is sRGB, so wide-gamut
+    targets rarely clip; the endpoint exists for the day decode goes wide.)"""
+    import io as _io
+
+    from viberoom.color_mgmt import convert_from_srgb
+    from viberoom.engine.cache import _decode_cache
+    from viberoom.engine.pipeline import render_float
+
+    path = _image_path(image_id)
+    linear = _decode_cache.get(path, half_size=True)
+    rendered = render_float(linear, load_sidecar(path).recipe)
+    proofed, oog = convert_from_srgb(rendered, space)
+    if warn:
+        rendered = rendered.copy()
+        rendered[oog] = [1.0, 0.0, 1.0]
+    from PIL import Image as PILImage
+
+    im = PILImage.fromarray((rendered * 255).round().astype("uint8"))
+    im.thumbnail((size, size), PILImage.LANCZOS)
+    buf = _io.BytesIO()
+    im.save(buf, "JPEG", quality=90)
+    return Response(content=buf.getvalue(), media_type="image/jpeg",
+                    headers={"X-Out-Of-Gamut-Percent": f"{float(oog.mean()) * 100:.3f}"})
+
+
+# ---------- HDR / panorama merge ----------
+
+class MergeIn(BaseModel):
+    image_ids: list[str] = Field(min_length=2, max_length=12)
+    out_name: str | None = Field(default=None, description="Output stem; defaults to hdr-/pano-<first>.")
+
+
+def _merge(kind: Literal["hdr", "pano"], body: MergeIn) -> dict:
+    from viberoom.export import _write_png16
+    from viberoom.merge import merge_hdr, merge_pano
+
+    lib = state.require_library()
+    paths = [_image_path(iid) for iid in body.image_ids]
+    fused = merge_hdr(paths) if kind == "hdr" else merge_pano(paths)
+    name = body.out_name or f"{kind}-{paths[0].stem}"
+    if not _VERSION_NAME_RE.match(name):
+        raise HTTPException(422, "out_name must be 1-64 word characters")
+    out = lib.root / f"{name}.png"
+    i = 1
+    while out.exists():
+        out = lib.root / f"{name}-{i}.png"
+        i += 1
+    _write_png16((fused * 65535).round().astype("uint16"), out)
+    scan(lib, state.db())
+    from viberoom.catalog.scanner import image_id as make_id
+
+    new_id = make_id(str(out.relative_to(lib.root)))
+    return {"id": new_id, "path": str(out), "width": fused.shape[1], "height": fused.shape[0]}
+
+
+@api.post("/merge/hdr")
+def merge_hdr_endpoint(body: MergeIn) -> dict:
+    """Exposure-fuse a bracketed set (align by phase correlation, Mertens
+    weights) into a 16-bit PNG that joins the library as a new image."""
+    return _merge("hdr", body)
+
+
+@api.post("/merge/pano")
+def merge_pano_endpoint(body: MergeIn) -> dict:
+    """Stitch a left-to-right pan (translation-only alignment with feathered
+    blending — best on tripod pans) into a 16-bit PNG in the library."""
+    return _merge("pano", body)
+
+
 # ---------- export ----------
+
+class WatermarkIn(BaseModel):
+    text: str | None = None
+    image: str | None = Field(default=None, description="Path to a PNG overlay.")
+    position: Literal[
+        "bottom-right", "bottom-left", "top-right", "top-left", "center", "bottom-center"
+    ] = "bottom-right"
+    opacity: float = Field(default=60, ge=0, le=100)
+    scale: float = Field(default=20, ge=1, le=100, description="Width as % of the long edge.")
+    margin: float = Field(default=2.5, ge=0, le=25)
+
 
 class ExportIn(BaseModel):
     format: ExportFormat = "jpeg"
     quality: int = Field(default=90, ge=1, le=100, description="JPEG only.")
     bit_depth: Literal[8, 16] = Field(default=8, description="16 is PNG only.")
     max_dimension: int | None = Field(default=None, ge=64, le=20000)
+    color_space: Literal["srgb", "display-p3", "adobe-rgb", "prophoto"] = "srgb"
+    watermark: WatermarkIn | None = None
+    output_sharpen: Literal["screen", "matte", "glossy"] | None = None
     variant: str | None = Field(default=None, description="Export a virtual copy's recipe.")
+    preset: str | None = Field(
+        default=None, description="Export preset name; explicit fields override its settings."
+    )
     path: str | None = None
 
 
-def _export_one(image_id: str, body: ExportIn) -> dict:
+def _resolve_export_preset(body: ExportIn, extra_exclude: set[str] | None = None) -> ExportIn:
+    """Merge a named export preset under the request's explicitly-set fields."""
+    if not body.preset:
+        return ExportIn(**body.model_dump(exclude=(extra_exclude or set()) | {"preset"}))
+    from viberoom.export_extras import load_export_preset
+
+    try:
+        settings = load_export_preset(body.preset)
+    except KeyError:
+        raise HTTPException(404, f"no export preset named {body.preset!r}")
+    explicit = body.model_dump(exclude_unset=True, exclude=(extra_exclude or set()) | {"preset"})
+    try:
+        return ExportIn(**{**settings, **explicit})
+    except ValidationError as e:
+        raise HTTPException(422, e.errors(include_url=False))
+
+
+def _export_one(image_id: str, body: ExportIn, filename: str | None = None, seq: int = 1) -> dict:
     lib = state.require_library()
     src = _image_path(image_id)
     if body.bit_depth == 16 and body.format != "png":
@@ -986,22 +1098,77 @@ def _export_one(image_id: str, body: ExportIn) -> dict:
     sc = load_sidecar(src)
     recipe = _recipe_for_variant(sc, body.variant)
     suffix = f"-{body.variant}" if body.variant else ""
-    out = (
-        Path(body.path).expanduser()
-        if body.path
-        else lib.exports_dir / (src.stem + suffix + default_extension(body.format))
-    )
+    if body.path:
+        out = Path(body.path).expanduser()
+    elif filename:
+        from viberoom.export_extras import render_filename
+
+        rows = state.db().query("SELECT rating, taken_at FROM images WHERE id=?", (image_id,))
+        try:
+            rel = render_filename(
+                filename, name=src.stem + suffix, seq=seq,
+                rating=rows[0]["rating"] if rows else 0,
+                taken_at=rows[0]["taken_at"] if rows else None,
+                ext=default_extension(body.format),
+            )
+        except (ValueError, KeyError, IndexError) as e:
+            raise HTTPException(422, f"bad filename template: {e}")
+        out = lib.exports_dir / rel
+    else:
+        out = lib.exports_dir / (src.stem + suffix + default_extension(body.format))
     result = export_file(
         src, recipe, out, body.format,
         quality=body.quality, bit_depth=body.bit_depth, max_dimension=body.max_dimension,
-        iptc=sc.iptc.model_dump(),
+        iptc=sc.iptc.model_dump(), color_space=body.color_space,
+        watermark=body.watermark.model_dump() if body.watermark else None,
+        output_sharpen=body.output_sharpen,
     )
     return {"id": image_id, "path": str(result), "format": body.format}
 
 
 @api.post("/images/{image_id}/export")
 def export_image(image_id: str, body: ExportIn) -> dict:
-    return _export_one(image_id, body)
+    return _export_one(image_id, _resolve_export_preset(body))
+
+
+# ---------- export presets ----------
+
+class ExportPresetIn(BaseModel):
+    settings: dict = Field(description="ExportIn-shaped settings (format, quality, watermark, ...).")
+
+
+@api.get("/export-presets")
+def list_export_presets_endpoint() -> dict:
+    from viberoom.export_extras import list_export_presets
+
+    return {"presets": list_export_presets()}
+
+
+@api.put("/export-presets/{name}")
+def save_export_preset_endpoint(name: str, body: ExportPresetIn) -> dict:
+    from viberoom.export_extras import ExportPresetError, save_export_preset
+
+    try:
+        ExportIn(**{k: v for k, v in body.settings.items() if k != "preset"})
+    except (ValidationError, TypeError) as e:
+        raise HTTPException(422, f"invalid export settings: {e}")
+    try:
+        return save_export_preset(name, body.settings)
+    except ExportPresetError as e:
+        raise HTTPException(422, str(e))
+
+
+@api.delete("/export-presets/{name}")
+def delete_export_preset_endpoint(name: str) -> dict:
+    from viberoom.export_extras import ExportPresetError, delete_export_preset
+
+    try:
+        delete_export_preset(name)
+    except KeyError:
+        raise HTTPException(404, f"no export preset named {name!r}")
+    except ExportPresetError as e:
+        raise HTTPException(422, str(e))
+    return {"deleted": name}
 
 
 # ---------- batch operations ----------
@@ -1023,6 +1190,10 @@ class BatchMetaIn(BaseModel):
 class BatchExportIn(ExportIn):
     image_ids: list[str] = Field(min_length=1, max_length=1000)
     path: None = None  # batch always writes to the exports dir
+    filename: str | None = Field(
+        default=None,
+        description="Filename template with {name} {seq} {rating} {date} {ext}; may contain '/'.",
+    )
 
 
 def _batch(image_ids: list[str], fn) -> dict:
@@ -1067,8 +1238,14 @@ def batch_set_meta(body: BatchMetaIn) -> dict:
 
 @api.post("/batch/export")
 def batch_export(body: BatchExportIn) -> dict:
-    single = ExportIn(**body.model_dump(exclude={"image_ids"}))
-    return _batch(body.image_ids, lambda iid: _export_one(iid, single))
+    single = _resolve_export_preset(body, extra_exclude={"image_ids", "filename"})
+    counter = {"n": 0}
+
+    def one(iid: str) -> dict:
+        counter["n"] += 1
+        return _export_one(iid, single, filename=body.filename, seq=counter["n"])
+
+    return _batch(body.image_ids, one)
 
 
 # ---------- LUTs ----------
