@@ -1,11 +1,20 @@
-/** GLSL for the pointwise half of the render pipeline.
+/** GLSL for the render pipeline.
  *
- *  This is a port of `render_float` in engine/pipeline.py, in its order:
+ *  `EDIT_SOURCE` is the pointwise half — a port of `render_float` in
+ *  engine/pipeline.py, in its order:
  *    white balance -> exposure -> regions -> sRGB transfer -> contrast
  *    -> tone curve -> colour/HSL -> colour grading -> vignette
- *  Lens, presence, detail, geometry, LUTs, masks, retouch and grain are later
- *  stages; a recipe that uses any of them never reaches this shader (see
- *  support.ts), which is what lets the chain be one pass with no resampling.
+ *  Everything after it in this file is the multi-pass half: presence
+ *  (dehaze/clarity/texture) and detail (noise reduction/sharpening), which
+ *  cannot be pointwise because each reads a blurred copy of the frame.
+ *
+ *  The vignette is its own pass rather than the tail of the edit pass, because
+ *  the engine applies it *after* presence and detail. Vignetting first would
+ *  hand the blurs a darkened frame, and a large-radius clarity or dehaze blur
+ *  spreads that darkening back inward — a visible halo, not a rounding error.
+ *
+ *  Lens, geometry, LUTs, masks, retouch and grain are later stages; a recipe
+ *  that uses any of them never reaches this shader (see support.ts).
  *
  *  Every formula below is transcribed from the corresponding op rather than
  *  re-derived, including the parts that look redundant. Where the Python
@@ -41,7 +50,6 @@ precision highp sampler2D;
 uniform sampler2D uSource;
 uniform sampler2D uCurves;
 
-uniform vec2  uResolution;
 uniform vec3  uWbGain;
 uniform float uExposure;      // EV stops
 uniform vec4  uRegions;       // highlights, shadows, whites, blacks, each /100
@@ -56,8 +64,6 @@ uniform float uGradeExp;      // p + 1
 uniform float uGradeBalance;  // balance/100 * 0.25
 uniform vec3  uGradeTint[3];  // chroma offset, strength already folded in
 uniform vec3  uGradeLum;      // per band: luminance/100 * 0.4
-uniform float uVignetteOn;
-uniform vec4  uVignette;      // amount/100, start, width, superellipse power
 
 out vec4 fragColor;
 
@@ -178,21 +184,194 @@ void main() {
     c = clamp(g, 0.0, 1.0);
   }
 
-  if (uVignetteOn > 0.5) {
-    // Pixel centers, matching the engine's (index + 0.5) / extent * 2 - 1.
-    vec2 n = gl_FragCoord.xy / uResolution * 2.0 - 1.0;
-    float p = uVignette.w;
-    float d = pow(pow(abs(n.y), p) + pow(abs(n.x), p), 1.0 / p) / sqrt(2.0);
-    float fall = smoothstep(uVignette.y, uVignette.y + uVignette.z, d);
-    c = clamp(clamp(c, 0.0, 1.0) * (1.0 + uVignette.x * fall), 0.0, 1.0);
-  }
-
   fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }`
 
-/** Copies the float intermediate out to the 8-bit canvas. Trivial today; it
- *  exists so the edit pass always writes somewhere with headroom, which is
- *  what the later blur/detail stages will need to read back. */
+/** engine/ops/effects.py `apply_vignette`. Its own pass because it runs after
+ *  presence and detail — see the note at the top of this file. */
+export const VIGNETTE_SOURCE = `#version 300 es
+precision highp float;
+uniform sampler2D uFrame;
+uniform vec2 uResolution;
+uniform vec4 uVignette;   // amount/100, start, width, superellipse power
+out vec4 fragColor;
+void main() {
+  vec3 c = texelFetch(uFrame, ivec2(gl_FragCoord.xy), 0).rgb;
+  // Pixel centers, matching the engine's (index + 0.5) / extent * 2 - 1.
+  vec2 n = gl_FragCoord.xy / uResolution * 2.0 - 1.0;
+  float p = uVignette.w;
+  float d = pow(pow(abs(n.y), p) + pow(abs(n.x), p), 1.0 / p) / sqrt(2.0);
+  float fall = smoothstep(uVignette.y, uVignette.y + uVignette.z, d);
+  fragColor = vec4(clamp(clamp(c, 0.0, 1.0) * (1.0 + uVignette.x * fall), 0.0, 1.0), 1.0);
+}`
+
+// ---------------------------------------------------------------------------
+// Multi-pass stage: the scalar planes the blurs run on, the two blur kernels,
+// and the passes that fold a blurred plane back into the frame.
+// ---------------------------------------------------------------------------
+
+/** Which scalar (or chroma) plane `PLANE_SOURCE` extracts. */
+export const PLANE_LUMA = 0
+export const PLANE_DARK = 1
+export const PLANE_MEAN = 2
+export const PLANE_CHROMA = 3
+
+/** Which presence op `PRESENCE_SOURCE` recombines. Values are also the order
+ *  `apply_presence` runs them in, which is not the slider order. */
+export const PRESENCE_DEHAZE = 0
+export const PRESENCE_CLARITY = 1
+export const PRESENCE_TEXTURE = 2
+
+/** Extracts the plane an op is about to blur.
+ *
+ *  Rec.709 luma for texture/clarity, the per-pixel channel minimum (the "dark
+ *  channel") for dehaze, and the plain mean for detail's luma/chroma split —
+ *  `apply_detail` really does use the unweighted mean where presence uses
+ *  Rec.709, so the two are separate modes rather than one shared luma.
+ */
+export const PLANE_SOURCE = `#version 300 es
+precision highp float;
+uniform sampler2D uFrame;
+uniform int uPlaneMode;
+out vec4 fragColor;
+const vec3 LUMA_W = vec3(${luma});
+void main() {
+  vec3 c = clamp(texelFetch(uFrame, ivec2(gl_FragCoord.xy), 0).rgb, 0.0, 1.0);
+  float mean = (c.r + c.g + c.b) / 3.0;
+  if (uPlaneMode == ${PLANE_LUMA}) fragColor = vec4(dot(c, LUMA_W), 0.0, 0.0, 1.0);
+  else if (uPlaneMode == ${PLANE_DARK}) fragColor = vec4(min(min(c.r, c.g), c.b), 0.0, 0.0, 1.0);
+  else if (uPlaneMode == ${PLANE_MEAN}) fragColor = vec4(mean, 0.0, 0.0, 1.0);
+  else fragColor = vec4(c - mean, 1.0);
+}`
+
+/** One box pass of `engine/ops/blur.py` `_box_blur_axis`, edge-clamped.
+ *
+ *  The Python takes a cumsum and differences it, which is O(1) per pixel; this
+ *  sums the window directly, which is O(radius). That is the right trade on a
+ *  GPU — a prefix sum needs a second dispatch and a scan, and the widest radius
+ *  the presence ops ever ask for is a few dozen texels — and it is strictly
+ *  more accurate, since nothing accumulates across the whole line.
+ */
+export const BOX_SOURCE = `#version 300 es
+precision highp float;
+uniform sampler2D uSrc;
+uniform ivec2 uSize;
+uniform ivec2 uStep;    // (0,1) blurs along y, (1,0) along x
+uniform int uRadius;
+out vec4 fragColor;
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  vec4 acc = vec4(0.0);
+  for (int i = -uRadius; i <= uRadius; i++) {
+    acc += texelFetch(uSrc, clamp(px + uStep * i, ivec2(0), uSize - 1), 0);
+  }
+  fragColor = acc / float(2 * uRadius + 1);
+}`
+
+/** One axis of `engine/ops/detail.py` `_blur`: a true gaussian, zero-padded.
+ *
+ *  Zero padding, not clamping — taps that fall outside contribute nothing but
+ *  still count toward the normalizing sum, which is exactly what convolving
+ *  with a pre-normalized kernel against a zero-padded array does, and is why
+ *  the engine's sharpened frames darken slightly at the border. Reproducing
+ *  the darkening is the point; a preview that disagrees at the edge is a
+ *  preview that visibly changes when the server render lands.
+ */
+export const GAUSS_SOURCE = `#version 300 es
+precision highp float;
+uniform sampler2D uSrc;
+uniform ivec2 uSize;
+uniform ivec2 uStep;
+uniform int uRadius;
+uniform float uSigma;
+out vec4 fragColor;
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  float denom = 2.0 * uSigma * uSigma;
+  vec4 acc = vec4(0.0);
+  float wsum = 0.0;
+  for (int i = -uRadius; i <= uRadius; i++) {
+    float w = exp(-float(i * i) / denom);
+    wsum += w;
+    ivec2 q = px + uStep * i;
+    if (q.x >= 0 && q.y >= 0 && q.x < uSize.x && q.y < uSize.y) {
+      acc += w * texelFetch(uSrc, q, 0);
+    }
+  }
+  fragColor = acc / wsum;
+}`
+
+/** engine/ops/presence.py, recombining a frame with its blurred plane.
+ *
+ *  The *unblurred* plane is recomputed here rather than carried in a second
+ *  texture: it is one dot product against pixels this pass already samples,
+ *  which is cheaper than a full-frame fetch.
+ */
+export const PRESENCE_SOURCE = `#version 300 es
+precision highp float;
+uniform sampler2D uFrame;
+uniform sampler2D uPlane;   // .r holds the blurred plane
+uniform int uMode;
+uniform float uAmount;      // slider / 100
+out vec4 fragColor;
+const vec3 LUMA_W = vec3(${luma});
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  vec3 x = clamp(texelFetch(uFrame, px, 0).rgb, 0.0, 1.0);
+  float blurred = texelFetch(uPlane, px, 0).r;
+
+  if (uMode == ${PRESENCE_TEXTURE}) {
+    x += (dot(x, LUMA_W) - blurred) * uAmount * 0.8;
+  } else if (uMode == ${PRESENCE_CLARITY}) {
+    float l = dot(x, LUMA_W);
+    // midtone weight 1 - (2L - 1)^2: skies and deep shadows stay clean
+    float mid = 2.0 * l - 1.0;
+    x += (l - blurred) * uAmount * 0.7 * (1.0 - mid * mid);
+  } else {
+    float t = uAmount;
+    if (t > 0.0) {
+      float s = blurred * 0.7 * t;
+      x = (x - s) / max(1.0 - s, 0.2);
+      // dehazing flattens colour; give saturation a nudge proportionally
+      float gray = dot(x, LUMA_W);
+      x = (x - gray) * (1.0 + 0.25 * t) + gray;
+    } else {
+      // lift toward a light atmospheric gray, weighted by the existing veil
+      float s = (blurred * 0.6 + 0.4) * 0.5 * (-t);
+      x += (0.85 - x) * s;
+    }
+  }
+  fragColor = vec4(clamp(x, 0.0, 1.0), 1.0);
+}`
+
+/** engine/ops/detail.py noise reduction: reassemble the luma/chroma split.
+ *  Either plane may have been blurred or not; this pass does not care. */
+export const NR_SOURCE = `#version 300 es
+precision highp float;
+uniform sampler2D uLuma;
+uniform sampler2D uChroma;
+out vec4 fragColor;
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  float luma = texelFetch(uLuma, px, 0).r;
+  fragColor = vec4(clamp(luma + texelFetch(uChroma, px, 0).rgb, 0.0, 1.0), 1.0);
+}`
+
+/** engine/ops/detail.py unsharp mask. */
+export const SHARPEN_SOURCE = `#version 300 es
+precision highp float;
+uniform sampler2D uFrame;
+uniform sampler2D uBlur;
+uniform float uStrength;    // amount/100 * (0.5 + detail/100)
+out vec4 fragColor;
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  vec3 c = texelFetch(uFrame, px, 0).rgb;
+  vec3 high = c - texelFetch(uBlur, px, 0).rgb;
+  fragColor = vec4(clamp(c + high * uStrength * 2.0, 0.0, 1.0), 1.0);
+}`
+
+/** Copies the float intermediate out to the 8-bit canvas. */
 export const PRESENT_SOURCE = `#version 300 es
 precision highp float;
 uniform sampler2D uFrame;

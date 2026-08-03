@@ -60,7 +60,17 @@ export function detectGpuSupport(): boolean {
     // which makes the expected pixel exact rather than a tolerance guess.
     renderer.render({})
     const px = renderer.readPixels()
-    cached = PROBE.every((v, i) => Math.abs(px[i] - Math.round(srgb(v) * 255)) <= 2)
+    const matches = (got: Uint8Array) =>
+      PROBE.every((v, i) => Math.abs(got[i] - Math.round(srgb(v) * 255)) <= 2)
+    cached = matches(px)
+
+    // Same answer, the long way round: a texture slider puts the frame through
+    // the plane, blur and recombine passes and the framebuffer ping-pong they
+    // need. On a 1x1 frame every blur axis is degenerate, so `fast_blur` is the
+    // identity and the high-pass is exactly zero — which keeps the expected
+    // pixel exact while still failing loudly if the extra targets are wrong.
+    renderer.render({ tone: { texture: 100 } })
+    cached = cached && matches(renderer.readPixels())
   } catch (e) {
     if (!(e instanceof GpuUnavailable)) console.warn('gpu preview smoke test failed', e)
     cached = false

@@ -7,8 +7,55 @@
  *  next to the Python it mirrors.
  */
 
-import { CURVE_SIZE, CURVE_ROWS } from './shader'
+import {
+  CURVE_SIZE,
+  CURVE_ROWS,
+  PRESENCE_CLARITY,
+  PRESENCE_DEHAZE,
+  PRESENCE_TEXTURE,
+} from './shader'
 import { HSL_CHANNEL_ORDER } from './constants'
+
+/** What the multi-pass stage needs to know about the frame it is drawing.
+ *
+ *  Presence radii are fractions of the short edge and so rescale themselves;
+ *  detail's are absolute pixel counts, which is why `scale` is here at all —
+ *  see the docstring on `engine/ops/detail.py apply_detail`.
+ */
+export interface FrameInfo {
+  width: number
+  height: number
+  /** This frame's size relative to the full-resolution one, as `render_float`
+   *  means it. */
+  scale: number
+}
+
+/** One presence op, already reduced to what the passes need. */
+export interface PresencePass {
+  /** PRESENCE_* from shader.ts; also the order `apply_presence` runs them. */
+  mode: number
+  /** slider / 100 */
+  amount: number
+  /** Box radius of each of the six `fast_blur` passes. */
+  radius: number
+}
+
+/** A separable gaussian, as `engine/ops/detail.py _blur` parameterizes one. */
+export interface GaussPass {
+  sigma: number
+  radius: number
+}
+
+export interface DetailUniforms {
+  /** Null when the op is off or its radius has stopped meaning anything. */
+  luma: GaussPass | null
+  chroma: GaussPass | null
+  /** True when either NR slider is up: the split-and-clip runs even if both
+   *  blurs were skipped for being degenerate, and clipping is observable. */
+  nrOn: boolean
+  sharpen: GaussPass | null
+  sharpenStrength: number
+}
 
 export interface Uniforms {
   wbGain: [number, number, number]
@@ -28,6 +75,10 @@ export interface Uniforms {
   gradeLum: [number, number, number]
   vignetteOn: number
   vignette: [number, number, number, number]
+  /** Empty unless a `FrameInfo` was supplied — the radii cannot be known
+   *  without one, and guessing them would draw the wrong blur. */
+  presence: PresencePass[]
+  detail: DetailUniforms | null
 }
 
 const num = (v: unknown, fallback: number): number =>
@@ -82,7 +133,63 @@ function identityLut(out: Float32Array, offset: number): void {
   for (let i = 0; i < CURVE_SIZE; i++) out[offset + i] = i / (CURVE_SIZE - 1)
 }
 
-export function buildUniforms(recipe: any): Uniforms {
+/** engine/ops/blur.py `box_radius`.
+ *
+ *  `fast_blur` is three chained box blurs, not a gaussian, and this integer is
+ *  the whole difference between the two at large sigma. Python rounds
+ *  half-to-even and this rounds half-up; the two disagree only when the
+ *  expression lands on an exact .5, which needs `sigma * sqrt(5) / 2` to be
+ *  exactly integral in binary floating point.
+ */
+function boxRadius(sigma: number): number {
+  return Math.max(1, Math.round((sigma * Math.sqrt(12 / 3 + 1)) / 2 - 0.5))
+}
+
+/** engine/ops/detail.py `_gaussian_kernel`: `int()` truncates, it does not
+ *  round, so a sigma of 0.9 gives radius 2 and not 3. */
+const gauss = (sigma: number): GaussPass => ({
+  sigma,
+  radius: Math.max(1, Math.trunc(sigma * 3)),
+})
+
+/** engine/ops/presence.py, in `apply_presence`'s order. Sigmas are fractions
+ *  of the short edge, so nothing here is scaled. */
+function buildPresence(tone: any, frame: FrameInfo): PresencePass[] {
+  const short = Math.min(frame.height, frame.width)
+  const ops: [number, number, number][] = [
+    [PRESENCE_DEHAZE, num(tone.dehaze, 0), Math.max(4.0, short * 0.02)],
+    [PRESENCE_CLARITY, num(tone.clarity, 0), Math.max(2.0, short * 0.015)],
+    [PRESENCE_TEXTURE, num(tone.texture, 0), Math.max(1.0, short / 1000)],
+  ]
+  return ops
+    .filter(([, amount]) => amount !== 0)
+    .map(([mode, amount, sigma]) => ({ mode, amount: amount / 100, radius: boxRadius(sigma) }))
+}
+
+/** engine/ops/detail.py `apply_detail`. */
+function buildDetail(detail: any, frame: FrameInfo): DetailUniforms | null {
+  const nr = detail?.noiseReduction ?? {}
+  const sh = detail?.sharpening ?? {}
+  const lum = num(nr.luminance, 0)
+  const col = num(nr.color, 0)
+  const amount = num(sh.amount, 0)
+  const sharpenSigma = num(sh.radius, 1.0) * frame.scale
+
+  // "Radii below ~0.3 px stop meaning anything" — the engine drops the blur
+  // and keeps the rest of the op, so the skips have to be per-blur.
+  const lumaSigma = (0.5 + (lum / 100) * 2.0) * frame.scale
+  const chromaSigma = (0.5 + (col / 100) * 3.0) * frame.scale
+  const out: DetailUniforms = {
+    luma: lum && lumaSigma >= 0.3 ? gauss(lumaSigma) : null,
+    chroma: col && chromaSigma >= 0.3 ? gauss(chromaSigma) : null,
+    nrOn: lum !== 0 || col !== 0,
+    sharpen: amount && sharpenSigma >= 0.3 ? gauss(sharpenSigma) : null,
+    sharpenStrength: (amount / 100) * (0.5 + num(sh.detail, 25) / 100),
+  }
+  return out.nrOn || out.sharpen ? out : null
+}
+
+export function buildUniforms(recipe: any, frame?: FrameInfo): Uniforms {
   const wb = recipe?.whiteBalance ?? {}
   const tone = recipe?.tone ?? {}
   const color = recipe?.color ?? {}
@@ -180,5 +287,7 @@ export function buildUniforms(recipe: any): Uniforms {
       0.05 + (num(vig.feather, 50) / 100) * 0.9,
       2 * 2 ** (num(vig.roundness, 0) / 100),
     ],
+    presence: frame ? buildPresence(tone, frame) : [],
+    detail: frame ? buildDetail(recipe?.detail, frame) : null,
   }
 }

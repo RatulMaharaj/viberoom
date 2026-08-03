@@ -81,8 +81,19 @@ export const RECIPE_DEFAULTS: Record<string, any> = {
   masks: [],
 }
 
-/** Everything the stage-1 shader reproduces exactly. Blurs, geometry, LUTs,
- *  masks, retouch and grain are later stages and are absent on purpose. */
+/** Everything the shader reproduces exactly. Geometry, LUTs, masks, retouch
+ *  and grain are later stages and are absent on purpose.
+ *
+ *  So is `detail`, which the shader *does* implement — see shader.ts's gauss,
+ *  NR and sharpen passes. Its radii are absolute pixel counts, so reproducing
+ *  it needs `render_float`'s `scale`: the ratio of the preview frame to the
+ *  full-resolution one. The source endpoint does not report that ratio and it
+ *  cannot be recovered from the frame's own dimensions, so the renderer's
+ *  `scale` is a default 1 and a sharpening radius would come out several times
+ *  too wide on any downscaled preview. Wrong is worse than slow; detail stays
+ *  on the server until the frame arrives with its scale attached, at which
+ *  point this list is the only thing that has to change.
+ */
 const IMPLEMENTED: string[][] = [
   ['whiteBalance', 'temp'],
   ['whiteBalance', 'tint'],
@@ -93,6 +104,9 @@ const IMPLEMENTED: string[][] = [
   ['tone', 'whites'],
   ['tone', 'blacks'],
   ['tone', 'toneCurve'],
+  ['tone', 'texture'],
+  ['tone', 'clarity'],
+  ['tone', 'dehaze'],
   ['color', 'saturation'],
   ['color', 'vibrance'],
   ['color', 'hsl'],
