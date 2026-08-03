@@ -19,6 +19,42 @@ import { gpuEnabled } from '../gpu'
 
 type Row = { label: string; ok: boolean | null; detail: string }
 
+/** Render a frame whose top half is bright and bottom half dark, present it,
+ *  and read back which half ended up on top. Returns [ok, detail]. */
+async function checkOrientation(): Promise<[boolean | null, string]> {
+  const { GpuRenderer } = await import('../gpu/renderer')
+  const { encodeRgb9e5 } = await import('../gpu/encode')
+  const W = 8, H = 8
+  const rgb = new Float32Array(W * H * 3)
+  for (let y = 0; y < H; y++) {
+    const v = y < H / 2 ? 0.9 : 0.05 // bright on top, in source order
+    for (let x = 0; x < W; x++) rgb.set([v, v, v], (y * W + x) * 3)
+  }
+
+  const canvas = document.createElement('canvas')
+  let renderer: InstanceType<typeof GpuRenderer> | null = null
+  try {
+    renderer = new GpuRenderer(canvas)
+    renderer.setSource({ width: W, height: H, format: 'rgb9e5', data: encodeRgb9e5(rgb, W, H) })
+    renderer.render({})
+
+    const flat = document.createElement('canvas')
+    flat.width = canvas.width; flat.height = canvas.height
+    const ctx = flat.getContext('2d')!
+    ctx.drawImage(canvas, 0, 0)
+    const top = ctx.getImageData(0, 0, 1, 1).data[0]
+    const bottom = ctx.getImageData(0, flat.height - 1, 1, 1).data[0]
+    if (top === bottom) return [null, `inconclusive — top and bottom both ${top}`]
+    return [top > bottom, top > bottom
+      ? `correct (top ${top}, bottom ${bottom})`
+      : `MIRRORED — the image is upside down (top ${top}, bottom ${bottom})`]
+  } catch (e) {
+    return [null, `could not run: ${e instanceof Error ? e.message : e}`]
+  } finally {
+    renderer?.dispose()
+  }
+}
+
 export function LocalCheck() {
   const [rows, setRows] = useState<Row[]>([])
   const [busy, setBusy] = useState(false)
@@ -118,6 +154,13 @@ export function LocalCheck() {
       const dated = await LocalSource.listImages({ sort: 'taken_at', order: 'desc', limit: 3 })
       push('sorted by capture time', true,
            dated.images.map((m) => m.filename).join(', ') || '(none)')
+
+      // Is the presented canvas the right way up? texImage2D puts source row 0
+      // at texel row 0, but the default framebuffer's origin is bottom-left, so
+      // unless something compensates, the top of the image lands at the bottom
+      // of the canvas. Nothing in the shader chain flips it, and a 1x1 smoke
+      // test cannot see it — so draw a frame whose halves differ and look.
+      push('canvas is the right way up', ...(await checkOrientation()))
 
       const [preview, previewMs] = await timed(() => LocalSource.preview(first.id, { size: 1600 }))
       setTiles((x) => [...x, { label: `preview — ${preview.rendered}`, url: preview.url }])
