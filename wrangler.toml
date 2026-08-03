@@ -7,7 +7,7 @@
 # Build settings in the Cloudflare dashboard (leave "Root directory" empty, so
 # everything below is relative to the repository root):
 #
-#   Build command      npm --prefix frontend ci && npm --prefix frontend run build
+#   Build command      pnpm --dir frontend install --frozen-lockfile && pnpm --dir frontend build
 #   Deploy command      npx wrangler deploy
 #
 # Cloudflare treats a repository containing wrangler.toml as a Workers project
