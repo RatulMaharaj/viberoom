@@ -43,7 +43,10 @@ export function Edit() {
   const [commitTick, setCommitTick] = useState(0)
   /** The rendered frame in the no-server build, where there is no `/preview`
    *  to point an <img> at and the blob has to be released by hand. */
-  const [localFrame, setLocalFrame] = useState<SourceUrl | null>(null)
+  /** The local frame, plus whether the *user* asked for the original. Kept
+   *  beside the frame rather than inside SourceUrl: it is a fact about the
+   *  request, not about the pixels. */
+  const [localFrame, setLocalFrame] = useState<(SourceUrl & { asked: boolean }) | null>(null)
 
   const local = source?.kind === 'local'
 
@@ -160,7 +163,11 @@ export function Edit() {
     let stale = false
     getSource()
       .then((s) => s.preview(id, { size: zoomed ? 4096 : 2048, original: showBefore }))
-      .then((frame) => (stale ? frame.release() : setLocalFrame(frame)))
+      // Remember whether the original was *asked for*. `rendered: 'original'`
+      // answers two different questions — "you wanted the untouched file" and
+      // "your edits are beyond what the browser can draw" — and only the
+      // second one is worth telling anyone about.
+      .then((frame) => (stale ? frame.release() : setLocalFrame({ ...frame, asked: showBefore })))
       .catch(() => {})
     return () => {
       stale = true
@@ -311,7 +318,8 @@ export function Edit() {
         )}
         {/* The one case where local and server disagree about what is on
             screen, so it is said out loud rather than shown quietly. */}
-        {local && !showBefore && gpuMode !== 'gpu' && localFrame?.rendered === 'original' && image?.has_edits && (
+        {local && !showBefore && !localFrame?.asked && gpuMode !== 'gpu'
+          && localFrame?.rendered === 'original' && image?.has_edits && (
           <span className="absolute top-3 right-3 badge badge-warning gap-1 font-mono">
             Original — these edits need the desktop app
           </span>
