@@ -130,15 +130,20 @@ or a USB device. Everything else is work someone has not done yet.
 ### Hosting it
 
 The build is a static site — no server, no functions, nothing to run.
-`wrangler.toml` configures Cloudflare Pages; the routing and cache rules live
-in `frontend/public/_redirects` and `_headers`, so they travel with the app to
-any host that reads those formats.
+`wrangler.toml` points Cloudflare at the built files; the routing and cache
+rules live in `frontend/public/_redirects` and `_headers`, so they travel with
+the app to any host that reads those formats.
+
+Leave **Root directory** empty, so the paths below match `wrangler.toml`:
 
 | Setting | Value |
 |---|---|
-| Root directory | `frontend` |
-| Build command | `npm ci && npm run build` |
-| Output directory | `dist` |
+| Build command | `npm --prefix frontend ci && npm --prefix frontend run build` |
+| Deploy command | `npx wrangler deploy` |
+
+Cloudflare treats a repository containing `wrangler.toml` as a Workers project
+and runs `wrangler deploy`, so the config uses `[assets]` rather than the older
+Pages key — a static site is served the same way either route.
 
 Only a subpath deploy needs `VITE_BASE` — `/` is the default and is what a
 domain root wants:
