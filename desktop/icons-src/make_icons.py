@@ -25,8 +25,16 @@ def tile(size: int) -> Image.Image:
     d = ImageDraw.Draw(img)
 
     d.rounded_rectangle([0, 0, size - 1, size - 1], radius=int(232 * s), fill=BG)
+    # thin inset frame, like a print border
+    inset = int(52 * s)
+    d.rounded_rectangle(
+        [inset, inset, size - 1 - inset, size - 1 - inset],
+        radius=int(196 * s),
+        outline=INK,
+        width=max(1, int(26 * s)),
+    )
 
-    font = ImageFont.truetype(str(FONT), int(560 * s))
+    font = ImageFont.truetype(str(FONT), int(520 * s))
     # optical centering: measure ink extents, not the em box
     box = d.textbbox((0, 0), "Vr", font=font)
     w, h = box[2] - box[0], box[3] - box[1]
