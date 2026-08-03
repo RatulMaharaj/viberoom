@@ -254,7 +254,41 @@ class ColorRangeMask(MaskBase):
     range: float = Field(default=30, ge=5, le=180, description="Hue distance of influence, degrees.")
 
 
-Mask = LinearGradientMask | RadialGradientMask | LuminanceRangeMask | ColorRangeMask
+class BrushStroke(StrictModel):
+    """One painted stroke: a polyline of normalized [x, y] points with a
+    round, feathered tip. Radius is a fraction of the shorter image side."""
+
+    points: list[tuple[float, float]] = Field(min_length=1)
+    radius: float = Field(default=0.05, gt=0, le=0.5)
+    feather: float = Field(default=50, ge=0, le=100)
+    flow: float = Field(default=100, gt=0, le=100, description="Strength this stroke adds.")
+    erase: bool = Field(default=False, description="Subtract from the mask instead of adding.")
+
+
+class BrushMask(MaskBase):
+    """Freeform painted mask built from strokes, applied in order (so erase
+    strokes carve out earlier ones). Coordinates are normalized 0-1 in the
+    final rendered frame."""
+
+    type: Literal["brush"] = "brush"
+    strokes: list[BrushStroke] = Field(min_length=1)
+
+
+Mask = LinearGradientMask | RadialGradientMask | LuminanceRangeMask | ColorRangeMask | BrushMask
+
+
+class RetouchSpot(StrictModel):
+    """Copy a circular patch from `source` onto `dest`. Mode 'heal' matches
+    the patch to the destination's illumination (texture from source, light
+    from dest); 'clone' copies pixels as-is. Coordinates normalized 0-1 in
+    the final rendered frame; radius is a fraction of the shorter side."""
+
+    mode: Literal["heal", "clone"] = "heal"
+    source: tuple[float, float]
+    dest: tuple[float, float]
+    radius: float = Field(gt=0, le=0.25)
+    feather: float = Field(default=50, ge=0, le=100)
+    opacity: float = Field(default=100, gt=0, le=100)
 
 
 class Recipe(StrictModel):
@@ -264,6 +298,10 @@ class Recipe(StrictModel):
     detail: Detail = Field(default_factory=Detail)
     geometry: Geometry = Field(default_factory=Geometry)
     effects: Effects = Field(default_factory=Effects)
+    retouch: list[RetouchSpot] = Field(
+        default_factory=list,
+        description="Heal/clone spots, applied in order after geometry (coordinates are post-crop).",
+    )
     masks: list[Mask] = Field(
         default_factory=list,
         description="Local adjustments, applied in order after global edits (coordinates are post-crop).",

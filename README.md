@@ -126,7 +126,9 @@ Agents may also edit `IMG_1234.CR3.vibe.json` directly, then `POST /library/scan
 | | grain {amount, size} | 0–100 |
 | masks[] | linear {start, end} · radial {center, radiusX/Y, feather} | coords 0–1 in the rendered frame |
 | | luminance {lumMin, lumMax, feather} · color {hue, range} | 0–100 · 0–360, 5–180 |
+| | brush {strokes: [{points, radius, feather, flow, erase}]} | radius 0–0.5 of short side |
 | | each mask: invert, opacity, adjustments {exposure, contrast, highlights, shadows, temp, tint, saturation, clarity, dehaze, sharpness} | EV −5..5, rest −100..100 |
+| retouch[] | {mode: heal\|clone, source, dest, radius, feather, opacity} | coords 0–1, radius 0–0.25 of short side |
 
 Pipeline order: WB → exposure → highlights/shadows/whites/blacks (linear light) →
 contrast → tone curve (luma, then R/G/B) → HSL/saturation → color grading →

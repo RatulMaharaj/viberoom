@@ -162,6 +162,11 @@ def update_recipe(image_id: str, patch: dict) -> dict:
              {type: 'radial', center: [x,y], radiusX/radiusY: 0-2, feather: 0-100}
              {type: 'luminance', lumMin/lumMax: 0-100, feather: 0-100}
              {type: 'color', hue: 0-360, range: 5-180}
+             {type: 'brush', strokes: [{points: [[x,y],...], radius: 0-0.5
+              (fraction of short side), feather/flow: 0-100, erase: bool}]}
+    - retouch: heal/clone spots, list of {mode: 'heal'|'clone', source: [x,y],
+             dest: [x,y], radius: 0-0.25 (fraction of short side),
+             feather/opacity: 0-100}. Same post-crop coordinates as masks.
 
     Example: {"tone": {"clarity": 20}, "masks": [{"type": "radial",
       "center": [0.5, 0.4], "radiusX": 0.3, "radiusY": 0.25,

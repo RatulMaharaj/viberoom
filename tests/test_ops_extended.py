@@ -184,3 +184,76 @@ def test_old_sidecar_recipe_still_validates():
     recipe = Recipe.model_validate(old)
     out = render(gradient(), recipe)
     assert out.dtype == np.uint8
+
+
+# ---------- brush masks (#3) ----------
+
+def test_brush_stroke_paints_where_drawn():
+    from viberoom.recipe.schema import BrushMask, BrushStroke
+    img = flat(0.5, 100, 100)
+    m = BrushMask(
+        strokes=[BrushStroke(points=[(0.2, 0.5), (0.8, 0.5)], radius=0.08, feather=30)],
+        adjustments=LocalAdjustments(exposure=-2),
+    )
+    w = mask_weight(m, img)
+    assert w[50, 50] > 0.9  # on the stroke line
+    assert w[10, 50] < 0.01  # far above it
+    out = apply_masks(img, [m])
+    assert out[50, 50, 0] < 0.3 and abs(out[10, 50, 0] - 0.5) < 0.01
+
+
+def test_brush_erase_carves_out():
+    from viberoom.recipe.schema import BrushMask, BrushStroke
+    img = flat(0.5, 100, 100)
+    m = BrushMask(strokes=[
+        BrushStroke(points=[(0.5, 0.5)], radius=0.3, feather=10),
+        BrushStroke(points=[(0.5, 0.5)], radius=0.1, feather=10, erase=True),
+    ], adjustments=LocalAdjustments(exposure=1))
+    w = mask_weight(m, img)
+    assert w[50, 50] < 0.05  # erased center
+    assert w[50, 25] > 0.8   # ring still painted
+
+
+def test_brush_flow_accumulates():
+    from viberoom.recipe.schema import BrushMask, BrushStroke
+    img = flat(0.5, 80, 80)
+    one = BrushMask(strokes=[BrushStroke(points=[(0.5, 0.5)], radius=0.2, flow=40)],
+                    adjustments=LocalAdjustments(exposure=1))
+    two = BrushMask(strokes=[BrushStroke(points=[(0.5, 0.5)], radius=0.2, flow=40)] * 2,
+                    adjustments=LocalAdjustments(exposure=1))
+    assert mask_weight(two, img)[40, 40] > mask_weight(one, img)[40, 40]
+
+
+# ---------- retouch (#2) ----------
+
+def test_clone_copies_source_patch():
+    from viberoom.engine.ops.retouch import apply_retouch
+    from viberoom.recipe.schema import RetouchSpot
+    img = flat(0.2, 100, 100)
+    img[40:60, 10:30] = 0.9  # bright square on the left
+    spot = RetouchSpot(mode="clone", source=(0.2, 0.5), dest=(0.8, 0.5),
+                       radius=0.08, feather=20)
+    out = apply_retouch(img, [spot])
+    assert out[50, 80, 0] > 0.8  # bright pixels cloned to the right
+    assert abs(out[50, 20, 0] - 0.9) < 1e-5  # source untouched
+
+
+def test_heal_removes_dark_spot():
+    from viberoom.engine.ops.retouch import apply_retouch
+    from viberoom.recipe.schema import RetouchSpot
+    rng = np.random.default_rng(3)
+    img = (0.6 + rng.normal(0, 0.02, (120, 120, 3))).astype(np.float32).clip(0, 1)
+    img[55:65, 55:65] = 0.05  # a dark blemish
+    spot = RetouchSpot(mode="heal", source=(0.2, 0.2), dest=(0.5, 0.5),
+                       radius=0.09, feather=40)
+    out = apply_retouch(img, [spot])
+    assert out[60, 60, 0] > 0.4  # blemish gone, roughly background brightness
+
+
+def test_retouch_near_edge_does_not_crash():
+    from viberoom.engine.ops.retouch import apply_retouch
+    from viberoom.recipe.schema import RetouchSpot
+    img = flat(0.5, 60, 60)
+    spots = [RetouchSpot(mode="clone", source=(0.02, 0.02), dest=(0.98, 0.98), radius=0.1)]
+    out = apply_retouch(img, spots)
+    assert out.shape == img.shape

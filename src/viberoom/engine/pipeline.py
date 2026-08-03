@@ -22,6 +22,7 @@ from viberoom.engine.ops.effects import apply_effects
 from viberoom.engine.ops.geometry import apply_geometry
 from viberoom.engine.ops.masks import apply_masks
 from viberoom.engine.ops.presence import apply_presence
+from viberoom.engine.ops.retouch import apply_retouch
 from viberoom.engine.ops.tone import (
     apply_contrast,
     apply_exposure,
@@ -47,6 +48,7 @@ def render_float(linear: np.ndarray, recipe: Recipe) -> np.ndarray:
     x = apply_detail(x, recipe.detail)
 
     x = apply_geometry(x, recipe.geometry)
+    x = apply_retouch(x, recipe.retouch)
     x = apply_masks(x, recipe.masks)
     x = apply_effects(x, recipe.effects)
 
