@@ -425,25 +425,26 @@ def _sync_sidecar_to_db(image_id: str) -> None:
 # ---------- filesystem browser (for the folder picker UI) ----------
 
 @api.get("/fs")
-def browse_fs(path: str | None = None) -> dict:
+def browse_fs(path: str | None = None, hidden: bool = False) -> dict:
     """List subdirectories of a path so the UI can offer a folder picker.
-    With no path, returns sensible roots: home and mounted volumes."""
+    With no path, returns sensible roots: home and mounted volumes.
+    Dot-directories are omitted unless `hidden` is set."""
+
+    def keep(c: Path) -> bool:
+        return c.is_dir() and (hidden or not c.name.startswith("."))
+
     if path is None:
         roots = [str(Path.home())]
         volumes = Path("/Volumes")
         if volumes.is_dir():
-            roots += sorted(
-                str(v) for v in volumes.iterdir() if v.is_dir() and not v.name.startswith(".")
-            )
+            roots += sorted(str(v) for v in volumes.iterdir() if keep(v))
         return {"path": None, "parent": None, "dirs": roots}
 
     p = Path(path).expanduser()
     if not p.is_dir():
         raise HTTPException(400, f"Not a directory: {p}")
     try:
-        dirs = sorted(
-            str(c) for c in p.iterdir() if c.is_dir() and not c.name.startswith(".")
-        )
+        dirs = sorted(str(c) for c in p.iterdir() if keep(c))
     except PermissionError:
         raise HTTPException(403, f"Permission denied: {p}")
     parent = None if p == p.parent else str(p.parent)

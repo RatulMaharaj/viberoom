@@ -10,22 +10,23 @@ interface NodeProps {
   onSelect: (path: string) => void
   /** Folder to reveal on open: this node expands if it's an ancestor of it. */
   reveal?: string | null
+  hidden: boolean
 }
 
 /** Is `dir` an ancestor of `target` (or the target itself)? */
 const onPathTo = (dir: string, target: string) =>
   target === dir || target.startsWith(dir.endsWith('/') ? dir : `${dir}/`)
 
-function TreeNode({ path, name, depth, selected, onSelect, reveal }: NodeProps) {
+function TreeNode({ path, name, depth, selected, onSelect, reveal, hidden }: NodeProps) {
   const [expanded, setExpanded] = useState(false)
   const [children, setChildren] = useState<string[] | null>(null)
   const [failed, setFailed] = useState(false)
   const row = useRef<HTMLDivElement>(null)
 
-  const load = async () => {
-    if (children !== null) return children
+  const load = async (force = false) => {
+    if (children !== null && !force) return children
     try {
-      const r = await api.browseFs(path)
+      const r = await api.browseFs(path, hidden)
       setChildren(r.dirs)
       return r.dirs
     } catch {
@@ -39,6 +40,17 @@ function TreeNode({ path, name, depth, selected, onSelect, reveal }: NodeProps) 
     if (!expanded) await load()
     setExpanded((v) => !v)
   }
+
+  // Flipping the hidden toggle invalidates any list we already fetched.
+  const firstRender = useRef(true)
+  useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false
+      return
+    }
+    if (children !== null) load(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hidden])
 
   // Walk open along the ancestor chain. Each node on the path expands and
   // loads its children, which mounts the next node down, and so on.
@@ -99,6 +111,7 @@ function TreeNode({ path, name, depth, selected, onSelect, reveal }: NodeProps) 
             selected={selected}
             onSelect={onSelect}
             reveal={reveal}
+            hidden={hidden}
           />
         ))}
     </>
@@ -118,10 +131,11 @@ export function FolderPicker({
   const [roots, setRoots] = useState<string[]>([])
   const [selected, setSelected] = useState<string | null>(current ?? null)
   const [error, setError] = useState<string | null>(null)
+  const [hidden, setHidden] = useState(false)
 
   useEffect(() => {
     api
-      .browseFs()
+      .browseFs(undefined, hidden)
       .then((r) => {
         const dirs = r.dirs
         // A library outside every listed root (e.g. under /private) would be
@@ -136,7 +150,7 @@ export function FolderPicker({
       })
       .catch((e) => setError(String(e)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current])
+  }, [current, hidden])
 
   return (
     <dialog className="modal modal-open">
@@ -154,10 +168,22 @@ export function FolderPicker({
               selected={selected}
               onSelect={setSelected}
               reveal={current}
+              hidden={hidden}
             />
           ))}
         </div>
-        <p className="text-xs opacity-50 mt-1">Click to select · double-click or chevron to expand</p>
+        <div className="flex items-center justify-between mt-1">
+          <p className="text-xs opacity-50">Click to select · double-click or chevron to expand</p>
+          <label className="flex items-center gap-1 text-xs cursor-pointer">
+            <input
+              type="checkbox"
+              className="checkbox checkbox-xs"
+              checked={hidden}
+              onChange={(e) => setHidden(e.target.checked)}
+            />
+            Show hidden
+          </label>
+        </div>
         <div className="modal-action">
           <button className="btn btn-ghost" onClick={onClose}>
             Cancel

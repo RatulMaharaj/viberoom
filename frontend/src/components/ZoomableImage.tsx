@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 /** Fit-to-container image with wheel zoom (cursor-anchored), drag pan and
- * double-click fit/zoom toggle. Scale 1 = fit. */
+ * click-to-zoom. Scale 1 = fit. */
+
+/** Where a single click lands. Scale is relative to fit, so 2 is twice the
+ *  fitted size — enough to judge focus without losing your place. */
+const CLICK_ZOOM = 2
 export function ZoomableImage({ src, alt, resetKey, filter, onZoomChange, onLoaded }: {
   src: string
   alt: string
@@ -17,6 +21,9 @@ export function ZoomableImage({ src, alt, resetKey, filter, onZoomChange, onLoad
   const container = useRef<HTMLDivElement>(null)
   const [t, setT] = useState({ scale: 1, x: 0, y: 0 })
   const drag = useRef<{ startX: number; startY: number; x: number; y: number } | null>(null)
+  /** set once a pointer travels far enough to count as a pan, so releasing
+   *  after a drag doesn't also fire the click-to-zoom toggle */
+  const panned = useRef(false)
 
   // reset when the image changes
   useEffect(() => {
@@ -64,6 +71,7 @@ export function ZoomableImage({ src, alt, resetKey, filter, onZoomChange, onLoad
   }, [clamp])
 
   const onPointerDown = (e: React.PointerEvent) => {
+    panned.current = false
     if (t.scale === 1) return
     e.preventDefault()
     ;(e.target as Element).setPointerCapture(e.pointerId)
@@ -72,6 +80,7 @@ export function ZoomableImage({ src, alt, resetKey, filter, onZoomChange, onLoad
   const onPointerMove = (e: React.PointerEvent) => {
     if (!drag.current) return
     const d = drag.current
+    if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) > 4) panned.current = true
     setT((cur) =>
       clamp({ scale: cur.scale, x: d.x + e.clientX - d.startX, y: d.y + e.clientY - d.startY }),
     )
@@ -80,17 +89,19 @@ export function ZoomableImage({ src, alt, resetKey, filter, onZoomChange, onLoad
     drag.current = null
   }
 
-  const onDoubleClick = (e: React.MouseEvent) => {
+  /** Toggle fit <-> CLICK_ZOOM, centring on whatever was clicked. */
+  const onClick = (e: React.MouseEvent) => {
+    if (panned.current) return
     const el = container.current
     if (!el) return
     if (t.scale > 1) {
       setT({ scale: 1, x: 0, y: 0 })
-    } else {
-      const rect = el.getBoundingClientRect()
-      const cx = e.clientX - rect.left - rect.width / 2
-      const cy = e.clientY - rect.top - rect.height / 2
-      setT(clamp({ scale: 3, x: -cx * 2, y: -cy * 2 }))
+      return
     }
+    const rect = el.getBoundingClientRect()
+    const cx = e.clientX - rect.left - rect.width / 2
+    const cy = e.clientY - rect.top - rect.height / 2
+    setT(clamp({ scale: CLICK_ZOOM, x: -cx * (CLICK_ZOOM - 1), y: -cy * (CLICK_ZOOM - 1) }))
   }
 
   return (
@@ -98,11 +109,11 @@ export function ZoomableImage({ src, alt, resetKey, filter, onZoomChange, onLoad
       ref={container}
       className="w-full h-full overflow-hidden flex items-center justify-center select-none"
       style={{ cursor: t.scale > 1 ? (drag.current ? 'grabbing' : 'grab') : 'zoom-in' }}
+      onClick={onClick}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
-      onDoubleClick={onDoubleClick}
     >
       <img
         src={src}

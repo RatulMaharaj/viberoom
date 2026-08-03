@@ -67,8 +67,13 @@ export const api = {
 
   listExts: () => fetch(`${BASE}/exts`).then((r) => json<{ exts: string[] }>(r)),
 
-  browseFs: (path?: string) =>
-    fetch(`${BASE}/fs${path ? `?path=${encodeURIComponent(path)}` : ''}`).then((r) =>
+  browseFs: (path?: string, hidden = false) =>
+    fetch(
+      `${BASE}/fs?${new URLSearchParams({
+        ...(path ? { path } : {}),
+        ...(hidden ? { hidden: 'true' } : {}),
+      })}`,
+    ).then((r) =>
       json<{ path: string | null; parent: string | null; dirs: string[] }>(r),
     ),
 
