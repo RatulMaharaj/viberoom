@@ -23,8 +23,8 @@ def _run(cmd: list[str], cwd: Path = ROOT) -> None:
 
 def _ensure_node_modules(dir: Path) -> None:
     if not (dir / "node_modules").is_dir():
-        print(f"==> npm install ({dir.relative_to(ROOT)})")
-        _run(["npm", "install"], cwd=dir)
+        print(f"==> pnpm install ({dir.relative_to(ROOT)})")
+        _run(["pnpm", "install"], cwd=dir)
 
 
 def dev() -> None:

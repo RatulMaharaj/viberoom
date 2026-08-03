@@ -36,6 +36,7 @@ and it happens through MCP, REST, or plain JSON sidecar files.
 |---|---|---|
 | **Python** | 3.12+ | `pyproject.toml` floor; 3.13 is fine |
 | **Node** | 20.19+ or 22.12+ | what Vite 8 requires |
+| **pnpm** | 10+ | `corepack enable` is enough; the version is pinned in package.json |
 | **[uv](https://docs.astral.sh/uv/)** | any recent | resolves and runs the backend |
 
 Nothing else. LibRaw and the image codecs arrive inside the `rawpy` and Pillow
@@ -46,8 +47,8 @@ git clone https://github.com/RatulMaharaj/viberoom.git
 cd viberoom
 
 uv sync                                  # backend deps into .venv (uv installs Python if missing)
-npm --prefix frontend install
-npm --prefix frontend run build          # typechecks, then writes frontend/dist
+pnpm --dir frontend install
+pnpm --dir frontend build                # typechecks, then writes frontend/dist
 
 uv run viberoom                          # UI + API → http://127.0.0.1:8423
 ```
@@ -68,7 +69,7 @@ Other ways to run:
 uv run dev             # hacking: backend --reload + Vite (:7666 "ROOM" → :8423 "VIBE")
 ```
 
-If something's off: `npm run build` failing on syntax that looks fine usually
+If something's off: `pnpm build` failing on syntax that looks fine usually
 means Node is below the Vite floor (`node -v`), and a `uv sync` that resolves
 oddly usually means an old uv (`uv self update`). The frontend must be built at
 least once — without `frontend/dist` the backend serves the API but no UI.
@@ -138,7 +139,7 @@ Leave **Root directory** empty, so the paths below match `wrangler.toml`:
 
 | Setting | Value |
 |---|---|
-| Build command | `npm --prefix frontend ci && npm --prefix frontend run build` |
+| Build command | `pnpm --dir frontend install --frozen-lockfile && pnpm --dir frontend build` |
 | Deploy command | `npx wrangler deploy` |
 
 Cloudflare treats a repository containing `wrangler.toml` as a Workers project
@@ -149,7 +150,7 @@ Only a subpath deploy needs `VITE_BASE` — `/` is the default and is what a
 domain root wants:
 
 ```bash
-VITE_BASE=/viberoom/ npm --prefix frontend run build   # e.g. GitHub Pages
+VITE_BASE=/viberoom/ pnpm --dir frontend build   # e.g. GitHub Pages
 ```
 
 ## Let an agent drive
@@ -220,7 +221,7 @@ datasets` lists where the big datasets live and what each one proves.
 
 ```bash
 uv run pytest                     # backend
-npm --prefix frontend run build   # frontend typecheck + build
+pnpm --dir frontend build        # frontend typecheck + build
 ```
 
 State lives in `<library>/.viberoom/` — a disposable SQLite index (sidecars are
