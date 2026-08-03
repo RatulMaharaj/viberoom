@@ -78,6 +78,15 @@ export function LocalCheck() {
       push('File System Access available', fileSystemAccessSupported(), navigator.userAgent.slice(0, 60))
       push('WebGL2 preview available', gpuEnabled(), 'renders the develop preview; no server fallback exists here')
 
+      // Absent is a normal answer, not a fault: it needs Chrome 146+ with
+      // chrome://flags/#enable-webmcp-testing on, and the app works without it.
+      const { webmcpToolCount, webmcpToolNames } = await import('../webmcp')
+      const tools = webmcpToolCount()
+      push('WebMCP tools registered', tools > 0 ? true : null,
+           'modelContext' in navigator
+             ? `${tools} tools: ${webmcpToolNames().join(', ')}`
+             : 'navigator.modelContext absent — needs Chrome 146+ with #enable-webmcp-testing')
+
       // Go through LocalSource, not pickLibrary: LocalSource keeps its own
       // root handle and file index, and picking the folder behind its back
       // grants access to a library it has never been told about.
