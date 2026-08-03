@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw, ImageFont
 HERE = Path(__file__).parent
 ROOT = HERE.parents[1]
 
-BG = "#0a0a0a"        # near-black
+BG = "#595959"        # 35% grey — the image-canvas grey
 INK = "#f5f5f5"       # paper white
 FONT = HERE / "SpaceGrotesk-Bold.ttf"
 
