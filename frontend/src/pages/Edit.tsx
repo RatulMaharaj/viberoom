@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Crop, Download, Maximize, Minimize } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api, type Flag, type ImageMeta } from '../api'
@@ -8,12 +8,18 @@ import { CropTool } from '../components/CropTool'
 import { ExportDialog } from '../components/ExportDialog'
 import { EditPanel } from '../components/EditPanel'
 import { Filmstrip } from '../components/Filmstrip'
+import { GpuPreview } from '../components/GpuPreview'
 import { ModuleTabs } from '../components/ModuleTabs'
 import { ZoomableImage } from '../components/ZoomableImage'
+import { createLiveRecipe } from '../gpu'
+import { useGpuPreview } from '../hooks/useGpuPreview'
 import { loadFilters } from '../filters'
 import { onSidecarChange } from '../events'
 import { loadLastImage, saveLastImage } from '../selection'
 import { handleUndoKey, pushAction } from '../undo'
+
+/** Long edge of the frame the client-side renderer works on. */
+const GPU_PREVIEW_SIZE = 2048
 
 export function Edit() {
   const { id } = useParams<{ id: string }>()
@@ -30,6 +36,24 @@ export function Edit() {
   const [cropMode, setCropMode] = useState(false)
   const [proof, setProof] = useState<string | null>(null)
   const [exportOpen, setExportOpen] = useState(false)
+  const [commitTick, setCommitTick] = useState(0)
+
+  /** Slider state on its way to the GPU. A plain mutable box, not state — see
+   *  gpu/live.ts for why that matters at pointer-move rates. */
+  const live = useRef(createLiveRecipe()).current
+
+  const gpu = useGpuPreview({
+    imageId: id,
+    // Fixed, and deliberately not the zoomed size: a 4096 px source frame is
+    // ~47 MB of texture, which is not a trade worth making for a preview.
+    size: GPU_PREVIEW_SIZE,
+    live,
+    // Soft proof, before/after and the crop tool all show something the
+    // stage-1 chain cannot reproduce, and zoomed-in means the photographer is
+    // judging real pixels, so the server render is the only honest answer.
+    enabled: !proof && !showBefore && !cropMode && !zoomed,
+    commitTick,
+  })
 
   const refreshAll = useCallback(() => {
     setBust(String(Date.now()))
@@ -188,10 +212,20 @@ export function Edit() {
             src={
               proof
                 ? api.proofUrl(id, proof, true, zoomed ? 4096 : 2048, bust)
-                : api.previewUrl(id, zoomed ? 4096 : 2048, bust, showBefore)
+                : (gpu.serverSrc ?? api.previewUrl(id, zoomed ? 4096 : 2048, bust, showBefore))
             }
             alt={image?.filename ?? ''}
-            filter={liveFilter}
+            // The GPU frame is the real chain, not an approximation, so the
+            // CSS delta must not be layered on top of it as well.
+            filter={gpu.mode === 'gpu' ? '' : liveFilter}
+            hideImage={gpu.mode === 'gpu'}
+            overlay={(transform) => (
+              <GpuPreview
+                canvasRef={gpu.canvasRef}
+                style={transform}
+                visible={gpu.mode === 'gpu'}
+              />
+            )}
             onZoomChange={setZoomed}
             onLoaded={() => setRenderTick((t) => t + 1)}
           />
@@ -233,6 +267,8 @@ export function Edit() {
           hasEdits={image?.has_edits ?? false}
           version={panelVersion}
           renderTick={renderTick}
+          live={live}
+          onCommitted={() => setCommitTick((t) => t + 1)}
           onLiveFilter={setLiveFilter}
           onProof={setProof}
           onRecipeChange={() => {

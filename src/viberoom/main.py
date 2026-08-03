@@ -1308,8 +1308,10 @@ def _recipe_for_variant(sc: Sidecar, variant: str | None) -> Recipe:
 _IMMUTABLE = "private, max-age=31536000, immutable"
 
 
-def _image_response(request: Request, data: bytes, etag_key: str, **headers: str) -> Response:
-    """JPEG response with an ETag, answering 304 when the client already has it.
+def _etag_response(
+    request: Request, data: bytes, etag_key: str, media_type: str, **headers: str
+) -> Response:
+    """Response with an ETag, answering 304 when the client already has it.
 
     Without this every navigation re-downloaded all 500 grid thumbnails: the
     bytes were disk-cached server-side but nothing told the browser it could
@@ -1320,7 +1322,12 @@ def _image_response(request: Request, data: bytes, etag_key: str, **headers: str
 
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=common)
-    return Response(content=data, media_type="image/jpeg", headers=common)
+    return Response(content=data, media_type=media_type, headers=common)
+
+
+def _image_response(request: Request, data: bytes, etag_key: str, **headers: str) -> Response:
+    """JPEG flavor of `_etag_response` — the shape nearly every route wants."""
+    return _etag_response(request, data, etag_key, "image/jpeg", **headers)
 
 
 @api.get("/images/{image_id}/thumbnail")
@@ -1375,6 +1382,58 @@ def preview(
 
     data = render_preview(path, recipe, size, lib.cache_dir)
     return _image_response(request, data, key, **{"X-Recipe-Hash": key})
+
+
+@api.get("/images/{image_id}/source")
+def source(
+    image_id: str,
+    request: Request,
+    size: Annotated[int, Query(ge=256, le=4096)] = 1600,
+    format: Literal["rgb9e5", "rgba16f"] = "rgb9e5",
+) -> Response:
+    """The decoded linear frame as raw WebGL texture bytes.
+
+    This is what lets the browser run the pointwise half of the pipeline
+    itself, so a slider drag costs a shader pass instead of a render and a
+    JPEG download. `size` means what it means for /preview, and the frame
+    comes back at the resolution the server would have *rendered* that
+    preview at — X-Source-Width/Height report it, and the client must honor
+    them or its frame is a different image from the one it settles to.
+
+    Deliberately uncompressed: the payload is float mantissas, so gzip finds
+    about 5% for a couple hundred milliseconds of CPU, over loopback.
+    """
+    from viberoom.engine.cache import PIPELINE_VERSION
+    from viberoom.engine.source import cached_source_dims, source_bytes
+
+    lib = state.require_library()
+    path = _image_path(image_id)
+    key = f"source-v{PIPELINE_VERSION}|{path}|{path.stat().st_mtime_ns}|{size}|{format}"
+
+    def _headers(w: int, h: int) -> dict[str, str]:
+        return {
+            "X-Source-Width": str(w),
+            "X-Source-Height": str(h),
+            "X-Source-Format": format,
+            "X-Pipeline-Version": str(PIPELINE_VERSION),
+        }
+
+    # Answer the conditional request before decoding anything. The dimensions
+    # still ship on the 304 so a client that revalidates rather than reusing
+    # its own cached headers is not left guessing.
+    if request.headers.get("if-none-match"):
+        dims = cached_source_dims(path, size, format, lib.cache_dir)
+        if dims is not None:
+            probe = _etag_response(
+                request, b"", key, "application/octet-stream", **_headers(*dims)
+            )
+            if probe.status_code == 304:
+                return probe
+
+    data, w, h = source_bytes(path, size, format, lib.cache_dir)
+    return _etag_response(
+        request, data, key, "application/octet-stream", **_headers(w, h)
+    )
 
 
 @api.get("/images/{image_id}/proof")

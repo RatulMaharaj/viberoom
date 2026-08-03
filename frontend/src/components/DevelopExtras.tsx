@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Camera,
   Check,
@@ -37,6 +37,40 @@ function Section({
       </button>
       {open && <div className="px-4 pb-3 text-xs space-y-2">{children}</div>}
     </div>
+  )
+}
+
+/** Coalesces a burst of edits into one write.
+ *
+ *  A pointer-move fires dozens of times a second and every one of those ticks
+ *  used to be a PATCH plus a full re-render on the mask and LUT sliders — by
+ *  some distance the worst latency in the app. Only the last value in a burst
+ *  is worth persisting, so that is the only one that is sent.
+ *
+ *  Lives in this module rather than in EditPanel because EditPanel already
+ *  imports it; the other direction would make the two files circular.
+ */
+export function useDebouncedCommit(delay = 300) {
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pending = useRef<(() => Promise<unknown>) | null>(null)
+
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
+
+  return useCallback(
+    (write: () => Promise<unknown>, onSettled?: () => void) => {
+      pending.current = write
+      if (timer.current) clearTimeout(timer.current)
+      timer.current = setTimeout(async () => {
+        timer.current = null
+        const run = pending.current
+        pending.current = null
+        await run?.()
+        // Skip the settle callback if another edit has already queued behind
+        // this one — its own settle will cover both.
+        if (!timer.current) onSettled?.()
+      }, delay)
+    },
+    [delay],
   )
 }
 
@@ -87,8 +121,21 @@ export function DevelopExtras({
   const [busy, setBusy] = useState('')
   const [note, setNote] = useState('')
 
-  const masks: any[] = recipe?.masks ?? []
+  // Local echo of whatever is being dragged. The committed recipe only comes
+  // back after the debounce, and a slider that snaps to a stale prop mid-drag
+  // is unusable.
+  const [draftMasks, setDraftMasks] = useState<any[] | null>(null)
+  const [draftLut, setDraftLut] = useState<number | null>(null)
+  const debounced = useDebouncedCommit()
+
+  const masks: any[] = draftMasks ?? recipe?.masks ?? []
   const snapshots: Record<string, any> = recipe?.__snapshots ?? {}
+
+  // a fresh recipe has landed, so the drafts have served their purpose
+  useEffect(() => {
+    setDraftMasks(null)
+    setDraftLut(null)
+  }, [recipe])
 
   const refresh = useCallback(() => {
     api.getHistory(imageId).then((r) => setHistory(r.history ?? [])).catch(() => setHistory([]))
@@ -117,6 +164,15 @@ export function DevelopExtras({
   }
 
   const patchMasks = (next: any[]) => run('masks', () => api.patchRecipe(imageId, { masks: next }))
+
+  /** Slider-rate mask edit: show it immediately, persist it once the drag stops. */
+  const dragMasks = (next: any[]) => {
+    setDraftMasks(next)
+    debounced(
+      () => api.patchRecipe(imageId, { masks: next }),
+      () => { onChanged(); refresh() },
+    )
+  }
 
   return (
     <div className="text-xs">
@@ -214,9 +270,7 @@ export function DevelopExtras({
                   className="checkbox checkbox-xs"
                   checked={!!m.invert}
                   onChange={(e) => {
-                    const next = structuredClone(masks)
-                    next[i].invert = e.target.checked
-                    patchMasks(next)
+                    patchMasks(masks.map((mask, j) => (j === i ? { ...mask, invert: e.target.checked } : mask)))
                   }}
                 />
                 invert
@@ -239,9 +293,12 @@ export function DevelopExtras({
                   step={step}
                   value={m.adjustments?.[key] ?? 0}
                   onChange={(e) => {
-                    const next = structuredClone(masks)
-                    next[i].adjustments = { ...(next[i].adjustments ?? {}), [key]: Number(e.target.value) }
-                    patchMasks(next)
+                    const next = masks.map((mask, j) =>
+                      j === i
+                        ? { ...mask, adjustments: { ...(mask.adjustments ?? {}), [key]: Number(e.target.value) } }
+                        : mask,
+                    )
+                    dragMasks(next)
                   }}
                 />
                 <span className="w-8 text-right font-mono opacity-70">
@@ -283,12 +340,15 @@ export function DevelopExtras({
               className="vr-slider flex-1"
               min={0}
               max={100}
-              value={recipe.color.lut.strength ?? 100}
-              onChange={(e) =>
-                run('lut', () =>
-                  api.patchRecipe(imageId, { color: { lut: { strength: Number(e.target.value) } } }),
+              value={draftLut ?? recipe.color.lut.strength ?? 100}
+              onChange={(e) => {
+                const strength = Number(e.target.value)
+                setDraftLut(strength)
+                debounced(
+                  () => api.patchRecipe(imageId, { color: { lut: { strength } } }),
+                  () => { onChanged(); refresh() },
                 )
-              }
+              }}
             />
           </div>
         )}
