@@ -39,3 +39,19 @@ not_found_handling = "single-page-application"
 # which version of everything else you get; the hashed assets and the 1.4 MB
 # LibRaw WebAssembly binary cache for a year, because their names change when
 # their contents do.
+
+# Matches what Cloudflare has on the deployed Worker, so the file and the
+# dashboard do not drift.
+#
+# There is no Worker code here — [assets] and nothing else — so this records
+# requests for the files, not anything the app does. Everything interesting
+# happens in the browser, where Cloudflare cannot see it. Sampling is 1 (keep
+# everything), which is right at this traffic and worth lowering if that
+# changes.
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
