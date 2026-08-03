@@ -720,6 +720,55 @@ def reset_recipe(image_id: str) -> dict:
     return Recipe().model_dump(mode="json")
 
 
+class CropAspectIn(BaseModel):
+    aspect: str | float = Field(
+        description="Target aspect as width:height — '3:2', '16:9', or a number like 1.5."
+    )
+    orientation: Literal["landscape", "portrait", "auto"] = Field(
+        default="auto", description="auto matches the image's own orientation."
+    )
+
+
+@api.post("/images/{image_id}/crop")
+def set_crop_aspect(image_id: str, body: CropAspectIn) -> dict:
+    """Helper: set the largest centered crop with a given aspect ratio.
+    (For full manual control, patch geometry.crop directly.)"""
+    if isinstance(body.aspect, str):
+        try:
+            wpart, hpart = body.aspect.split(":")
+            aspect = float(wpart) / float(hpart)
+        except (ValueError, ZeroDivisionError):
+            raise HTTPException(422, f"bad aspect {body.aspect!r}; use '3:2' or a number")
+    else:
+        aspect = float(body.aspect)
+    if not (0.1 <= aspect <= 10):
+        raise HTTPException(422, "aspect out of range")
+
+    rows = state.db().query("SELECT width, height FROM images WHERE id=?", (image_id,))
+    if not rows or not rows[0]["width"] or not rows[0]["height"]:
+        raise HTTPException(422, "image dimensions unknown; rescan the library")
+    w, h = rows[0]["width"], rows[0]["height"]
+    sc = load_sidecar(_image_path(image_id))
+    if sc.recipe.geometry.orientation in (90, 270):
+        w, h = h, w
+    img_aspect = w / h
+    if body.orientation == "portrait" or (body.orientation == "auto" and img_aspect < 1):
+        aspect = min(aspect, 1 / aspect)
+    else:
+        aspect = max(aspect, 1 / aspect)
+
+    if aspect >= img_aspect:  # target is wider: full width, trim height
+        frac = img_aspect / aspect
+        crop = Crop(left=0, top=(1 - frac) / 2, right=1, bottom=(1 + frac) / 2)
+    else:  # target is taller: full height, trim width
+        frac = aspect / img_aspect
+        crop = Crop(left=(1 - frac) / 2, top=0, right=(1 + frac) / 2, bottom=1)
+    recipe = sc.recipe.model_copy(deep=True)
+    recipe.geometry.crop = crop
+    _update_sidecar(image_id, recipe=recipe)
+    return recipe.geometry.model_dump(mode="json")
+
+
 class AutoIn(BaseModel):
     white_balance: bool = True
 
@@ -1020,6 +1069,49 @@ def batch_set_meta(body: BatchMetaIn) -> dict:
 def batch_export(body: BatchExportIn) -> dict:
     single = ExportIn(**body.model_dump(exclude={"image_ids"}))
     return _batch(body.image_ids, lambda iid: _export_one(iid, single))
+
+
+# ---------- LUTs ----------
+
+class LutIn(BaseModel):
+    content: str = Field(description="The .cube file contents.")
+
+
+@api.get("/luts")
+def list_luts() -> dict:
+    from viberoom.engine.ops.lut import LUTS_DIR
+
+    if not LUTS_DIR.is_dir():
+        return {"luts": []}
+    return {"luts": sorted(p.stem for p in LUTS_DIR.glob("*.cube"))}
+
+
+@api.put("/luts/{name}")
+def save_lut(name: str, body: LutIn) -> dict:
+    """Install a .cube LUT (1D or 3D). Reference it from a recipe as
+    color.lut {name, strength, stage: 'pre' (camera profile) | 'post' (look)}."""
+    from viberoom.engine.ops.lut import LUTS_DIR, LutError, parse_cube
+
+    _check_version_name(name)
+    try:
+        kind, data = parse_cube(body.content)
+    except LutError as e:
+        raise HTTPException(422, str(e))
+    LUTS_DIR.mkdir(parents=True, exist_ok=True)
+    (LUTS_DIR / f"{name}.cube").write_text(body.content)
+    return {"name": name, "kind": kind, "size": int(data.shape[0])}
+
+
+@api.delete("/luts/{name}")
+def delete_lut(name: str) -> dict:
+    from viberoom.engine.ops.lut import LUTS_DIR
+
+    _check_version_name(name)
+    p = LUTS_DIR / f"{name}.cube"
+    if not p.exists():
+        raise HTTPException(404, f"no LUT named {name!r}")
+    p.unlink()
+    return {"deleted": name}
 
 
 # ---------- presets ----------

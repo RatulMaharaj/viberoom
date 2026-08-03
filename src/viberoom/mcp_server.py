@@ -262,7 +262,14 @@ def update_recipe(image_id: str, patch: dict) -> dict:
     - detail: {sharpening: {amount: 0-150, radius: 0.5-3, detail: 0-100},
                noiseReduction: {luminance: 0-100, color: 0-100}}
     - geometry: {rotate: -45..45 deg, orientation: 0|90|180|270, flipH/flipV: bool,
+                 perspective: {vertical/horizontal: -100..100 keystone correction,
+                                scale: 50-150 zoom to hide warped borders},
                  crop: {left,top,right,bottom: 0-1 normalized}}
+    - lens: {distortion: -100..100 (+ fixes barrel), vignette: -100..100
+             (+ brightens corners), caRed/caBlue: -100..100 lateral CA,
+             defringe: {amount: 0-100}} — applied first, pre-crop
+    - color.lut: {name: installed LUT name (see luts tool), strength: 0-100,
+             stage: 'pre' (camera profile) | 'post' (creative look)}
     - effects: {vignette: {amount: -100..100 (negative darkens), midpoint/feather: 0-100,
                  roundness: -100..100}, grain: {amount: 0-100, size: 0-100}}
     - masks: local adjustments; a list of masks, each {type, ...geometry, invert,
@@ -421,6 +428,36 @@ def batch_export(
     body = {"image_ids": image_ids, "format": format, "quality": quality,
             "bit_depth": bit_depth, "max_dimension": max_dimension}
     return _call("POST", "/batch/export", json=body).json()
+
+
+@mcp.tool()
+def set_crop_aspect(
+    image_id: str,
+    aspect: str,
+    orientation: Literal["landscape", "portrait", "auto"] = "auto",
+) -> dict:
+    """Set the largest centered crop with a given aspect ratio ('3:2',
+    '16:9', '1:1', or a number). For full manual control patch
+    geometry.crop via update_recipe."""
+    return _call("POST", f"/images/{image_id}/crop",
+                 json={"aspect": aspect, "orientation": orientation}).json()
+
+
+@mcp.tool()
+def luts(
+    action: Literal["list", "save", "delete"] = "list",
+    name: str | None = None,
+    content: str | None = None,
+) -> dict:
+    """Manage .cube LUTs (1D/3D) in ~/.viberoom/luts/. 'save' installs from
+    the file contents in `content`. Reference from a recipe via color.lut
+    {name, strength, stage} — stage 'pre' for camera-matching profiles,
+    'post' for creative looks."""
+    if action == "list":
+        return _call("GET", "/luts").json()
+    if action == "save":
+        return _call("PUT", f"/luts/{name}", json={"content": content}).json()
+    return _call("DELETE", f"/luts/{name}").json()
 
 
 @mcp.tool()
