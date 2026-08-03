@@ -1,8 +1,6 @@
 import { LayoutGrid, SlidersHorizontal } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { loadLastImage } from '../selection'
-import { AgentInfoButton } from './AgentInfo'
-import { AgentToggle } from './AgentDock'
 
 export function ModuleTabs({ active, imageId }: { active: 'catalog' | 'develop'; imageId?: string }) {
   const navigate = useNavigate()
@@ -25,8 +23,6 @@ export function ModuleTabs({ active, imageId }: { active: 'catalog' | 'develop';
         <SlidersHorizontal size={14} /> Develop
       </button>
     </div>
-    <AgentInfoButton />
-    <AgentToggle />
     </div>
   )
 }

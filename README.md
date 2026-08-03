@@ -21,9 +21,10 @@ sidecar files.
   heal/clone, grain — and local masks: gradients, luminance/color ranges,
   brushes, AI subject/sky masks. Everything the API can do is reachable from
   the interface, and vice versa.
-- 🤖 **Claude Code in the sidebar.** If a local `claude` install is detected,
-  the robot icon opens a real Claude Code session wired to this library —
-  model/effort/permission picker, approve-deny prompts and all.
+- 🤖 **Bring your own agent.** The app is a PWA that exposes its tools to
+  whatever agent your browser provides, via WebMCP — it no longer launches an
+  agent of its own. Outside the browser, `viberoom-mcp` drives it from Claude
+  Code.
 - 🗂️ **DAM things.** Ratings, flags, labels, keywords, collections (smart too),
   stacks, dupes, history, snapshots, virtual copies, multi-folder catalogs.
 - 📥 **In and out.** Card ingest, tethered capture, HDR & pano merge, ML

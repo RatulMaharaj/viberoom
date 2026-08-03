@@ -1,0 +1,22 @@
+# Cloudflare Pages / Netlify response headers.
+
+# The service worker must never be served stale. It is the thing that decides
+# which version of everything else you get, so a cached copy pins the whole app
+# to an old build — the classic way a PWA becomes impossible to update.
+/sw.js
+  Cache-Control: no-cache
+
+# Same for the shell: it names the hashed asset files, so a stale one points at
+# bundles that may no longer exist.
+/index.html
+  Cache-Control: no-cache
+
+# Hashed assets are immutable by construction — the name changes when the
+# content does, so they can be cached indefinitely.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# The LibRaw binary is 1.4 MB and changes only when the dependency does.
+/assets/*.wasm
+  Cache-Control: public, max-age=31536000, immutable
+  Content-Type: application/wasm
