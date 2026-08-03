@@ -148,8 +148,14 @@ export function LocalCheck() {
       const [, metaMs] = await timed(metadataReady)
       const withExif = (await LocalSource.listImages({ limit: 10000 })).images
         .filter((m) => Object.keys(m.exif).length > 0)
-      push('EXIF backfilled', withExif.length > 0,
-           `${withExif.length}/${found.length} files in ${metaMs} ms`)
+      // Only cameras write EXIF. A folder of generated PNGs yielding none is
+      // the right answer, not a failure — so this only counts as a test when
+      // there is something present that ought to carry tags.
+      const shouldHaveExif = found.some((f) => f.isRaw || /^\.jpe?g$/i.test(f.ext))
+      push('EXIF backfilled', shouldHaveExif ? withExif.length > 0 : null,
+           shouldHaveExif
+             ? `${withExif.length}/${found.length} files in ${metaMs} ms`
+             : `no RAW or JPEG here — PNGs carry no EXIF, so none is correct`)
 
       const dated = await LocalSource.listImages({ sort: 'taken_at', order: 'desc', limit: 3 })
       push('sorted by capture time', true,

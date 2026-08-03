@@ -100,7 +100,7 @@ export function useGpuPreview({ imageId, size, live, enabled, commitTick }: Opti
     const seq = ++issued.current
     const asked = live.current
     fetchServerFrame(imageId, size, ctrl.signal)
-      .then((frame) => {
+      .then(async (frame) => {
         // Out-of-order arrival is normal — a 4096 px render started earlier can
         // land after a later one. The hash settles it without a stale swap:
         // an older response whose pixels are already on screen is a no-op,
@@ -109,11 +109,34 @@ export function useGpuPreview({ imageId, size, live, enabled, commitTick }: Opti
           frame.revoke()
           return
         }
+
+        // Decode before swapping, or every commit flashes. Handing the <img> a
+        // new src only *starts* a decode: the canvas would be hidden and the
+        // image shown while it still had nothing to paint, so one frame of
+        // blank landed between the two renders. Worse, revoking the previous
+        // blob URL pulled the pixels out from under the image still using it.
+        // Decoding first makes the swap a straight cut.
+        try {
+          const img = new Image()
+          img.src = frame.url
+          await img.decode()
+        } catch {
+          // A decode failure is not a reason to drop the frame — the <img> may
+          // still render it, and the GPU frame stays up if it does not.
+        }
+        if (ctrl.signal.aborted) {
+          frame.revoke()
+          return
+        }
+
         applied.current = seq
         shownHash.current = frame.hash
         shownRecipe.current = asked
         setServerFrame((prev) => {
-          prev?.revoke()
+          // Revoke a frame later: the <img> has swapped to the new URL by the
+          // time this runs, but the browser may still be reading the old one
+          // to paint the frame that is on screen right now.
+          if (prev) setTimeout(() => prev.revoke(), 1000)
           return frame
         })
       })
