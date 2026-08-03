@@ -131,6 +131,57 @@ def cmd_pack(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_auto(args: argparse.Namespace) -> int:
+    from viberoom.bench import autobench
+    from viberoom.bench import pack as pack_mod
+
+    if args.files:
+        files = [Path(f).expanduser() for f in args.files]
+    else:
+        pack_dir = Path(args.dir).expanduser() if args.dir else pack_mod.DEFAULT_PACK_DIR
+        files = [
+            pack_mod.pack_path(s, pack_dir)
+            for s in pack_mod.SAMPLES
+            if pack_mod.pack_path(s, pack_dir).exists()
+        ]
+    if not files:
+        print("no files; run `viberoom-bench pack` or pass files", file=sys.stderr)
+        return 2
+
+    if args.strategy not in autobench.STRATEGIES:
+        print(f"unknown strategy {args.strategy!r}", file=sys.stderr)
+        return 2
+
+    degradations = (
+        autobench.CAST_DEGRADATIONS if args.strategy == "wb" else autobench.DEGRADATIONS
+    )
+
+    def progress(i: int, n: int, path: Path) -> None:
+        if not args.quiet:
+            print(f"[{i}/{n}] {path.name}", file=sys.stderr)
+
+    report = autobench.run_auto_bench(
+        files,
+        degradations=degradations,
+        recipe_for=autobench.STRATEGIES[args.strategy],
+        strategy_name=args.strategy,
+        on_progress=progress,
+    )
+    print(report.summary())
+    if args.json:
+        Path(args.json).write_text(report.to_json())
+        print(f"\nwrote {args.json}")
+
+    if args.require_improvement and report.helped_fraction < args.require_improvement:
+        print(
+            f"\nonly {report.helped_fraction:.0%} of cases improved, "
+            f"below --require-improvement {args.require_improvement:.0%}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def cmd_lab(args: argparse.Namespace) -> int:
     from viberoom.bench import pack as pack_mod
 
@@ -250,6 +301,21 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--verify", action="store_true", help="checksum and decode every file")
     k.add_argument("--force", action="store_true", help="re-download even if present")
     k.set_defaults(func=cmd_pack)
+
+    a = sub.add_parser("auto", help="measure auto-adjust by degrade-and-recover")
+    a.add_argument("files", nargs="*", help="images (default: the whole test pack)")
+    a.add_argument("--dir", default=None, help="pack directory")
+    a.add_argument(
+        "--strategy", default="wb",
+        help="wb (fair pass/fail on colour casts) | auto (diagnostic only)",
+    )
+    a.add_argument("--json", help="write the full report here")
+    a.add_argument(
+        "--require-improvement", type=float,
+        help="exit nonzero unless at least this fraction of cases improve (0-1)",
+    )
+    a.add_argument("--quiet", action="store_true")
+    a.set_defaults(func=cmd_auto)
 
     lab = sub.add_parser("lab", help="build a folder of test images to open in viberoom")
     lab.add_argument(
