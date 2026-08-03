@@ -17,6 +17,38 @@ def image_id(rel_path: str) -> str:
     return hashlib.sha1(rel_path.encode()).hexdigest()[:16]
 
 
+def _num(v: str | None) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(str(v).split("/")[0]) if "/" in str(v) else float(v)
+    except ValueError:
+        return None
+
+
+def summarize_exif(exif: dict) -> dict:
+    """Derive the filterable summary columns from a raw EXIF dict."""
+    make, model = exif.get("Make", "").strip(), exif.get("Model", "").strip()
+    camera = model if model.startswith(make.split(" ")[0]) and make else " ".join(
+        p for p in (make, model) if p
+    )
+    iso = _num(exif.get("ISO"))
+    focal = _num(exif.get("FocalLength"))
+    taken = exif.get("DateTimeOriginal")
+    if taken:
+        # EXIF "YYYY:MM:DD HH:MM:SS" -> sortable ISO-ish "YYYY-MM-DD HH:MM:SS"
+        parts = str(taken).split(" ", 1)
+        date = parts[0].replace(":", "-")
+        taken = date + (" " + parts[1] if len(parts) > 1 else "")
+    return {
+        "camera": camera or None,
+        "lens": exif.get("LensModel") or None,
+        "iso": int(iso) if iso else None,
+        "focal_length": focal,
+        "taken_at": taken,
+    }
+
+
 def scan(library: Library, db: CatalogDB, full: bool = False) -> dict:
     """Walk the library, upsert changed files, sync sidecars, prune deleted.
     full=True re-reads metadata for every file even if unchanged."""
@@ -42,19 +74,26 @@ def scan(library: Library, db: CatalogDB, full: bool = False) -> dict:
 
             sc = load_sidecar(p)
             width, height, exif = read_metadata(p)
+            summary = summarize_exif(exif)
             db.execute(
                 """INSERT INTO images (id, rel_path, filename, ext, is_raw, filesize,
-                       mtime, width, height, exif_json, rating, flag, has_edits, sidecar_mtime)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       mtime, width, height, exif_json, rating, flag, label, keywords_json,
+                       has_edits, sidecar_mtime, camera, lens, iso, focal_length, taken_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET filesize=excluded.filesize,
                        mtime=excluded.mtime, width=excluded.width, height=excluded.height,
                        exif_json=excluded.exif_json, rating=excluded.rating,
-                       flag=excluded.flag, has_edits=excluded.has_edits,
-                       sidecar_mtime=excluded.sidecar_mtime""",
+                       flag=excluded.flag, label=excluded.label,
+                       keywords_json=excluded.keywords_json, has_edits=excluded.has_edits,
+                       sidecar_mtime=excluded.sidecar_mtime, camera=excluded.camera,
+                       lens=excluded.lens, iso=excluded.iso,
+                       focal_length=excluded.focal_length, taken_at=excluded.taken_at""",
                 (
                     iid, rel, name, p.suffix.lower(), int(is_raw(p)), stat.st_size,
                     stat.st_mtime, width, height, json.dumps(exif), sc.rating, sc.flag,
-                    int(sc.recipe != Recipe()), sc_mtime,
+                    sc.label, json.dumps(sc.keywords), int(sc.recipe != Recipe()), sc_mtime,
+                    summary["camera"], summary["lens"], summary["iso"],
+                    summary["focal_length"], summary["taken_at"],
                 ),
             )
             if row:

@@ -1,11 +1,11 @@
-"""Color operations: white balance (linear space), saturation/vibrance and
-per-channel HSL (display space, via HSV)."""
+"""Color operations: white balance (linear space), saturation/vibrance,
+per-channel HSL and three-way color grading (display space, via HSV)."""
 
 from __future__ import annotations
 
 import numpy as np
 
-from viberoom.recipe.schema import HSL, HSL_CHANNELS, Color, WhiteBalance
+from viberoom.recipe.schema import HSL, HSL_CHANNELS, Color, ColorGrading, WhiteBalance
 
 # Channel centers on the hue wheel in degrees (Lightroom's 8 bands).
 _HUE_CENTERS = {
@@ -99,3 +99,40 @@ def apply_color(img: np.ndarray, color: Color) -> np.ndarray:
                 v = np.clip(v * (1 + w * ch.luminance / 100 * 0.5), 0, 1)
 
     return _hsv_to_rgb(h, s, v)
+
+
+def _luma(img: np.ndarray) -> np.ndarray:
+    return img[..., 0] * 0.2126 + img[..., 1] * 0.7152 + img[..., 2] * 0.0722
+
+
+def apply_color_grading(img: np.ndarray, grading: ColorGrading) -> np.ndarray:
+    """Shadows/midtones/highlights tint wheels. Display-space [0,1].
+    Tints are chroma-only offsets (no brightness shift); luminance is a
+    per-band gain."""
+    if grading == ColorGrading():
+        return img
+    x = np.clip(img, 0, 1)
+    # balance shifts which luma counts as shadow vs highlight
+    luma = np.clip(_luma(x) - grading.balance / 100 * 0.25, 0, 1)
+    # blending controls how far each band bleeds into the midtones
+    p = 1.0 + (100 - grading.blending) / 100 * 2.0  # 1 (soft) .. 3 (tight)
+    w_shadows = (1.0 - luma) ** (p + 1)
+    w_highlights = luma ** (p + 1)
+    w_midtones = np.clip(1.0 - w_shadows - w_highlights, 0, 1)
+
+    for band, w in (
+        (grading.shadows, w_shadows),
+        (grading.midtones, w_midtones),
+        (grading.highlights, w_highlights),
+    ):
+        if band.saturation == 0 and band.luminance == 0:
+            continue
+        if band.saturation:
+            tint = _hsv_to_rgb(
+                np.array(band.hue / 360.0), np.array(1.0), np.array(1.0)
+            ).astype(np.float32)
+            offset = tint - tint.mean()  # chroma only: zero net brightness
+            x = x + w[..., None] * (band.saturation / 100 * 0.35) * offset
+        if band.luminance:
+            x = x * (1.0 + w[..., None] * band.luminance / 100 * 0.4)
+    return np.clip(x, 0, 1)

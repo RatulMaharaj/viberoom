@@ -28,12 +28,32 @@ CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating);
 CREATE INDEX IF NOT EXISTS idx_images_flag ON images(flag);
 """
 
+# columns added after v1; applied idempotently so old catalog.db files upgrade
+# in place (the DB is disposable anyway — a full rescan rebuilds everything)
+_MIGRATIONS = [
+    "ALTER TABLE images ADD COLUMN label TEXT",
+    "ALTER TABLE images ADD COLUMN keywords_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE images ADD COLUMN camera TEXT",
+    "ALTER TABLE images ADD COLUMN lens TEXT",
+    "ALTER TABLE images ADD COLUMN iso INTEGER",
+    "ALTER TABLE images ADD COLUMN focal_length REAL",
+    "ALTER TABLE images ADD COLUMN taken_at TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_images_label ON images(label)",
+    "CREATE INDEX IF NOT EXISTS idx_images_taken_at ON images(taken_at)",
+]
+
 
 class CatalogDB:
     def __init__(self, path: Path):
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        for stmt in _MIGRATIONS:
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        self._conn.commit()
         self._lock = threading.Lock()
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
