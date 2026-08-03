@@ -1,108 +1,108 @@
 {
   "cases": {
     "color/grading": {
-      "peak_mb": 361.0,
-      "seconds": 0.2558
+      "peak_mb": 361.1,
+      "seconds": 0.2918
     },
     "color/hsl": {
       "peak_mb": 401.2,
-      "seconds": 0.5219
+      "seconds": 0.5665
     },
     "color/saturation": {
       "peak_mb": 332.5,
-      "seconds": 0.4353
+      "seconds": 0.4721
     },
     "color/vibrance": {
       "peak_mb": 332.5,
-      "seconds": 0.4382
+      "seconds": 0.4859
     },
     "detail/denoise": {
-      "peak_mb": 223.5,
-      "seconds": 0.4616
+      "peak_mb": 315.0,
+      "seconds": 0.3019
     },
     "detail/sharpen": {
-      "peak_mb": 223.4,
-      "seconds": 0.2059
+      "peak_mb": 223.3,
+      "seconds": 0.1586
     },
     "effects/vignette-grain": {
       "peak_mb": 935.6,
-      "seconds": 0.4512
+      "seconds": 0.4984
     },
     "exposure/+1ev": {
       "peak_mb": 292.0,
-      "seconds": 0.0725
+      "seconds": 0.081
     },
     "exposure/-1.5ev": {
       "peak_mb": 292.0,
-      "seconds": 0.0871
+      "seconds": 0.0946
     },
     "geometry/crop-rotate": {
       "peak_mb": 233.7,
-      "seconds": 0.2804
+      "seconds": 0.2944
     },
     "lens/ca-defringe": {
-      "peak_mb": 757.4,
-      "seconds": 0.7055
+      "peak_mb": 757.5,
+      "seconds": 0.777
     },
     "lens/distortion-vignette": {
       "peak_mb": 1557.4,
-      "seconds": 0.5865
+      "seconds": 0.6219
     },
     "masks/brush": {
-      "peak_mb": 612.2,
-      "seconds": 0.3146
+      "peak_mb": 612.9,
+      "seconds": 0.3427
     },
     "masks/linear": {
       "peak_mb": 521.3,
-      "seconds": 0.336
+      "seconds": 0.3569
     },
     "masks/radial+luminance": {
       "peak_mb": 797.7,
-      "seconds": 0.7494
+      "seconds": 0.8367
     },
     "noop/chart": {
       "peak_mb": 206.1,
-      "seconds": 0.0834
+      "seconds": 0.1473
     },
     "noop/gradient": {
       "peak_mb": 223.3,
-      "seconds": 0.0891
+      "seconds": 0.1742
     },
     "presence/clarity": {
       "peak_mb": 505.0,
-      "seconds": 0.6405
+      "seconds": 0.7353
     },
     "presence/dehaze": {
       "peak_mb": 476.9,
-      "seconds": 0.4588
+      "seconds": 0.5123
     },
     "retouch/heal-clone": {
-      "peak_mb": 212.0,
-      "seconds": 0.1002
+      "peak_mb": 212.1,
+      "seconds": 0.1083
     },
     "stack/full": {
-      "peak_mb": 1128.2,
-      "seconds": 1.0628
+      "peak_mb": 1128.1,
+      "seconds": 1.0563
     },
     "tone/contrast": {
       "peak_mb": 498.2,
-      "seconds": 0.1374
+      "seconds": 0.3271
     },
     "tone/curve": {
       "peak_mb": 360.7,
-      "seconds": 0.1158
+      "seconds": 0.1253
     },
     "tone/recovery": {
-      "peak_mb": 435.3,
-      "seconds": 0.215
+      "peak_mb": 435.4,
+      "seconds": 0.2409
     },
     "wb/shade": {
       "peak_mb": 274.8,
-      "seconds": 0.1085
+      "seconds": 0.1169
     },
     "wb/tungsten": {
       "peak_mb": 274.8,
-      "seconds": 0.1084
+      "seconds": 0.1173
     }
   },
   "size": [

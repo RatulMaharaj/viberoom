@@ -257,3 +257,31 @@ def test_retouch_near_edge_does_not_crash():
     spots = [RetouchSpot(mode="clone", source=(0.02, 0.02), dest=(0.98, 0.98), radius=0.1)]
     out = apply_retouch(img, spots)
     assert out.shape == img.shape
+
+
+def test_separable_blur_matches_numpy_convolve_exactly():
+    """The vectorized blur replaced a per-row np.convolve loop. It has to be
+    the same arithmetic, not merely a similar one — zero padding at the edges
+    included."""
+    from viberoom.engine.ops.detail import _blur, _gaussian_kernel
+
+    def reference(img, sigma):
+        k = _gaussian_kernel(sigma)
+        out = np.apply_along_axis(lambda m: np.convolve(m, k, mode="same"), 0, img)
+        out = np.apply_along_axis(lambda m: np.convolve(m, k, mode="same"), 1, out)
+        return out.astype(np.float32)
+
+    rng = np.random.default_rng(5)
+    for shape in ((37, 51), (37, 51, 3)):
+        for sigma in (0.5, 1.2, 3.5):
+            img = rng.random(shape, dtype=np.float32)
+            np.testing.assert_allclose(_blur(img, sigma), reference(img, sigma), atol=1e-6)
+
+
+def test_separable_blur_does_not_mutate_its_input():
+    from viberoom.engine.ops.detail import _blur
+
+    img = np.random.default_rng(6).random((16, 16, 3), dtype=np.float32)
+    before = img.copy()
+    _blur(img, 1.5)
+    np.testing.assert_array_equal(img, before)
