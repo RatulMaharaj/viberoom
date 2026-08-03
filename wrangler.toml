@@ -1,22 +1,28 @@
-# Cloudflare Pages.
+# Cloudflare, static assets only.
 #
 # viberoom is a static site: the browser reads your photos off disk through the
 # File System Access API and does the decoding and rendering itself, so there
-# is no backend to deploy and nothing here to configure beyond where the built
-# files land.
+# is no Worker code here — just files to serve.
 #
-# Build settings in the Pages dashboard:
-#   Root directory   frontend
-#   Build command    npm ci && npm run build
-#   Output directory dist
+# Build settings in the Cloudflare dashboard (leave "Root directory" empty, so
+# everything below is relative to the repository root):
 #
-# The base path stays "/" (Vite's default), which is what a Pages domain wants.
-# Only a subpath deploy — GitHub Pages, say — needs VITE_BASE set, and the
-# service worker and manifest follow it automatically.
+#   Build command      npm --prefix frontend ci && npm --prefix frontend run build
+#   Deploy command      npx wrangler deploy
+#
+# Cloudflare treats a repository containing wrangler.toml as a Workers project
+# and runs `wrangler deploy`, so this is written for that rather than for the
+# older Pages layout — `pages_build_output_dir` is a Pages key and Workers does
+# not recognise it.
 
 name = "viberoom"
 compatibility_date = "2026-08-04"
-pages_build_output_dir = "frontend/dist"
+
+[assets]
+directory = "./frontend/dist"
+# Client-side routes like /edit/<id> are not files. Serving the shell for them
+# is what makes a deep link or a reload work.
+not_found_handling = "single-page-application"
 
 # Routing and cache headers are NOT here on purpose: they live in
 # frontend/public/_redirects and frontend/public/_headers, which Vite copies
@@ -26,9 +32,9 @@ pages_build_output_dir = "frontend/dist"
 # Two things they encode that are easy to get wrong:
 #
 #   * Every unmatched path serves index.html with a 200, so client-side routes
-#     like /edit/<id> work. That also means a request to /api/v1/... comes back
-#     as a cheerful 200 of HTML rather than a 404 — which is why the app checks
-#     for JSON before believing it has a backend. Do not "simplify" that check.
+#     work. That also means a request to /api/v1/... comes back as a cheerful
+#     200 of HTML rather than a 404 — which is why the app checks for JSON
+#     before believing it has a backend. Do not "simplify" that check.
 #
 #   * sw.js and index.html must never be cached, since they decide which
 #     version of everything else you get. The hashed assets and the 1.4 MB
