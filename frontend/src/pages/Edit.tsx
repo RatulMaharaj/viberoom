@@ -324,7 +324,10 @@ export function Edit() {
         {/* Not until the source is known. Rendering earlier meant falling
             through to the server's preview URL, which in a PWA is a request to
             a backend that does not exist. The skeleton above covers the gap. */}
-        {id && source && (
+        {/* Not while the local frame is still being decoded: its src would be
+            empty, which the browser resolves to the page and draws as a broken
+            image — on top of the stand-in above. */}
+        {id && source && !(local && !localFrame) && (
           <ZoomableImage
             resetKey={id}
             src={

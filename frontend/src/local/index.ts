@@ -335,7 +335,9 @@ async function thumbnailUrl(id: string): Promise<SourceUrl> {
     })
     cacheThumb(id, blob)
     return blobUrl(blob, 'original')
-  } catch {
+  } catch (err) {
+    // Same reasoning as previewUrl: the tile is right, the silence was not.
+    console.warn(`thumbnail failed for ${e.file.filename}`, err)
     return placeholder(e.file.ext)
   }
 }
