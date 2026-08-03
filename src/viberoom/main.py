@@ -20,6 +20,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
@@ -51,15 +52,33 @@ _approve_app = permission_mcp.mcp.streamable_http_app(streamable_http_path="/mcp
 
 
 _mcp_stack: AsyncExitStack | None = None
+#: Held at module scope only so asyncio does not garbage-collect the running
+#: startup rescan out from under itself.
+_startup_scan: asyncio.Task | None = None
+
+
+def _log_startup_scan(task: asyncio.Task) -> None:
+    """Surface a failed background rescan instead of letting asyncio swallow it
+    into an un-retrieved exception at interpreter shutdown."""
+    if not task.cancelled() and task.exception() is not None:
+        import traceback
+
+        traceback.print_exception(task.exception())
 
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
-    global _mcp_stack
+    global _mcp_stack, _startup_scan
     lib = load_last_library()
     if lib is not None:
         state.open_library(lib)
-        scan(lib, state.db())
+        # Reopening the last library used to scan it synchronously here, so on
+        # a large catalog the server accepted no connections until the whole
+        # tree had been walked. The rows from the previous session are already
+        # in the DB, so the UI has something to show immediately; the rescan
+        # only reconciles what changed while we were away.
+        _startup_scan = asyncio.create_task(run_in_threadpool(scan, lib, state.db()))
+        _startup_scan.add_done_callback(_log_startup_scan)
     # The MCP session managers are single-use, but tests enter this lifespan
     # once per TestClient — so start them at most once and leave them up for
     # the life of the process.
@@ -403,13 +422,24 @@ async def events():
                         rel = str(Path(p).relative_to(lib.root))[: -len(SIDECAR_SUFFIX)]
                     except ValueError:
                         rel = p[: -len(SIDECAR_SUFFIX)]  # extra roots: absolute
-                    iid = make_id(rel)
-                    _sync_sidecar_to_db(iid)
-                    ids.add(iid)
+                    ids.add(make_id(rel))
             if ids:
+                # Off the event loop, and once for the whole batch rather than
+                # once per file: each id is a SQLite round-trip plus a sidecar
+                # read, and a batch metadata edit over a large selection would
+                # otherwise stall every other request for the duration.
+                await run_in_threadpool(_sync_sidecars_to_db, sorted(ids))
                 yield {"event": "sidecar", "data": json.dumps(sorted(ids))}
 
     return EventSourceResponse(gen())
+
+
+def _sync_sidecars_to_db(image_ids: list[str]) -> None:
+    """Refresh several rows in one transaction — the watcher reports changes in
+    batches, and committing per file is what made a bulk edit expensive."""
+    with state.db().transaction():
+        for image_id in image_ids:
+            _sync_sidecar_to_db(image_id)
 
 
 def _sync_sidecar_to_db(image_id: str) -> None:
