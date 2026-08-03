@@ -277,16 +277,9 @@ export function EditPanel({
 
   useEffect(() => {
     api.getRecipe(imageId).then((r) => {
-      // Republishing an identical recipe is not free: the preview decides
-      // whether the sliders have moved by object identity, so a fresh object
-      // with the same values reads as an edit. This effect re-runs after every
-      // commit, so that meant each one swapped to the server's render and then
-      // straight back to the GPU ~130ms later — the flash.
-      const unchanged =
-        recipeRef.current && JSON.stringify(recipeRef.current) === JSON.stringify(r)
-      if (!unchanged) setRecipe(r)
-      lastSaved.current = unchanged ? recipeRef.current : r
-      displayed.current = lastSaved.current
+      setRecipe(r)
+      lastSaved.current = r
+      displayed.current = r
       onLiveFilter?.('')
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
