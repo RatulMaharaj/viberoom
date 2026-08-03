@@ -451,6 +451,85 @@ def browse_fs(path: str | None = None, hidden: bool = False) -> dict:
     return {"path": str(p), "parent": parent, "dirs": dirs}
 
 
+def _native_picker_cmd(start: str | None) -> list[str] | None:
+    """The platform's folder-chooser, or None if we can't offer one.
+
+    Only meaningful because viberoom is a local app: the dialog opens on the
+    same machine as the browser. Remote use falls back to the tree picker.
+    """
+    import shutil as _shutil
+    import sys as _sys
+
+    if _sys.platform == "darwin":
+        default = f'default location POSIX file "{start}" ' if start else ""
+        return [
+            "osascript",
+            "-e", 'tell application "System Events" to activate',
+            "-e", f'POSIX path of (choose folder with prompt "Export to" {default})',
+        ]
+    if _shutil.which("zenity"):
+        return ["zenity", "--file-selection", "--directory", *(["--filename", start] if start else [])]
+    if _shutil.which("kdialog"):
+        return ["kdialog", "--getexistingdirectory", start or "."]
+    return None
+
+
+@api.get("/fs/native-picker")
+def native_picker_available() -> dict:
+    return {"available": _native_picker_cmd(None) is not None}
+
+
+class NativePickerIn(BaseModel):
+    start: str | None = None
+
+
+@api.post("/fs/native-picker")
+def native_picker(body: NativePickerIn) -> dict:
+    """Open the OS folder dialog and return what was chosen.
+
+    Blocks until the user answers, so it runs in FastAPI's threadpool (this is
+    a sync endpoint on purpose).
+    """
+    cmd = _native_picker_cmd(body.start)
+    if cmd is None:
+        raise HTTPException(501, "No native folder dialog on this platform.")
+    import subprocess as _sp
+
+    try:
+        out = _sp.run(cmd, capture_output=True, text=True, timeout=300)
+    except _sp.TimeoutExpired:
+        raise HTTPException(504, "Folder dialog timed out.")
+    path = out.stdout.strip()
+    if out.returncode != 0 or not path:
+        # Cancelling is a normal outcome, not an error.
+        return {"path": None, "cancelled": True}
+    return {"path": path.rstrip("/") or "/", "cancelled": False}
+
+
+class MkdirIn(BaseModel):
+    parent: str
+    name: str
+
+
+@api.post("/fs/mkdir")
+def make_dir(body: MkdirIn) -> dict:
+    """Create a folder, so the picker can make one without leaving the app."""
+    name = body.name.strip()
+    if not name or "/" in name or name in {".", ".."}:
+        raise HTTPException(400, "Folder name must be a single path segment.")
+    parent = Path(body.parent).expanduser()
+    if not parent.is_dir():
+        raise HTTPException(400, f"Not a directory: {parent}")
+    target = parent / name
+    if target.exists():
+        raise HTTPException(409, f"Already exists: {target}")
+    try:
+        target.mkdir(parents=False)
+    except PermissionError:
+        raise HTTPException(403, f"Permission denied: {parent}")
+    return {"path": str(target)}
+
+
 # ---------- images ----------
 
 def _row_to_dict(row) -> dict:
@@ -1393,6 +1472,10 @@ class ExportIn(BaseModel):
     preset: str | None = Field(
         default=None, description="Export preset name; explicit fields override its settings."
     )
+    dest_dir: str | None = Field(
+        default=None,
+        description="Directory to write into. Defaults to <library>/exports.",
+    )
     path: str | None = None
 
 
@@ -1411,6 +1494,11 @@ def _resolve_export_preset(body: ExportIn, extra_exclude: set[str] | None = None
         return ExportIn(**{**settings, **explicit})
     except ValidationError as e:
         raise HTTPException(422, e.errors(include_url=False))
+
+
+def _export_base(body: ExportIn, lib) -> Path:
+    """Where exports land: the chosen folder, else <library>/exports."""
+    return Path(body.dest_dir).expanduser() if body.dest_dir else lib.exports_dir
 
 
 def _export_one(image_id: str, body: ExportIn, filename: str | None = None, seq: int = 1) -> dict:
@@ -1436,9 +1524,9 @@ def _export_one(image_id: str, body: ExportIn, filename: str | None = None, seq:
             )
         except (ValueError, KeyError, IndexError) as e:
             raise HTTPException(422, f"bad filename template: {e}")
-        out = lib.exports_dir / rel
+        out = _export_base(body, lib) / rel
     else:
-        out = lib.exports_dir / (src.stem + suffix + default_extension(body.format))
+        out = _export_base(body, lib) / (src.stem + suffix + default_extension(body.format))
     result = export_file(
         src, recipe, out, body.format,
         quality=body.quality, bit_depth=body.bit_depth, max_dimension=body.max_dimension,

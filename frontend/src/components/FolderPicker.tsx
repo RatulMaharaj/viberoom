@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, ChevronRight, Folder, FolderOpen } from 'lucide-react'
+import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus } from 'lucide-react'
 import { api } from '../api'
 
 interface NodeProps {
@@ -122,16 +122,42 @@ export function FolderPicker({
   onSelect,
   onClose,
   current,
+  confirmLabel = 'Use this folder',
+  title = 'Choose a folder',
 }: {
   onSelect: (path: string) => void
   onClose: () => void
   /** The library folder currently open, revealed and preselected on mount. */
   current?: string | null
+  /** Wording for the confirm button; the picker is used for more than
+   *  choosing a library now. */
+  confirmLabel?: string
+  title?: string
 }) {
   const [roots, setRoots] = useState<string[]>([])
   const [selected, setSelected] = useState<string | null>(current ?? null)
   const [error, setError] = useState<string | null>(null)
   const [hidden, setHidden] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [newName, setNewName] = useState('')
+  // Remounting the tree is how a freshly created folder gets picked up: the
+  // reveal walk re-runs and expands to it.
+  const [treeKey, setTreeKey] = useState(0)
+  const [reveal, setReveal] = useState<string | null>(current ?? null)
+
+  const createFolder = async () => {
+    if (!selected || !newName.trim()) return
+    try {
+      const r = await api.mkdir(selected, newName.trim())
+      setNewName('')
+      setCreating(false)
+      setSelected(r.path)
+      setReveal(r.path)
+      setTreeKey((k) => k + 1)
+    } catch (e) {
+      setError(String(e))
+    }
+  }
 
   useEffect(() => {
     api
@@ -155,10 +181,13 @@ export function FolderPicker({
   return (
     <dialog className="modal modal-open">
       <div className="modal-box max-w-lg">
-        <h3 className="font-bold mb-2">Choose a folder</h3>
+        <h3 className="font-bold mb-2">{title}</h3>
         <div className="font-mono text-xs opacity-70 break-all mb-2 min-h-4">{selected ?? ' '}</div>
         {error && <div className="alert alert-error text-xs p-2 mb-2">{error}</div>}
-        <div className="bg-base-200 rounded-box max-h-96 overflow-y-auto overflow-x-auto py-1">
+        <div
+          key={treeKey}
+          className="bg-base-200 rounded-box max-h-96 overflow-y-auto overflow-x-auto py-1"
+        >
           {roots.map((r) => (
             <TreeNode
               key={r}
@@ -167,11 +196,41 @@ export function FolderPicker({
               depth={0}
               selected={selected}
               onSelect={setSelected}
-              reveal={current}
+              reveal={reveal}
               hidden={hidden}
             />
           ))}
         </div>
+        {creating ? (
+          <div className="flex items-center gap-1 mt-2">
+            <input
+              autoFocus
+              className="input input-xs input-bordered flex-1"
+              placeholder={selected ? `New folder in ${selected.split('/').pop()}` : 'Select a parent first'}
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') createFolder()
+                if (e.key === 'Escape') setCreating(false)
+              }}
+            />
+            <button className="btn btn-xs btn-primary" onClick={createFolder} disabled={!newName.trim()}>
+              Create
+            </button>
+            <button className="btn btn-xs btn-ghost" onClick={() => setCreating(false)}>
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            className="btn btn-xs mt-2"
+            disabled={!selected}
+            title={selected ? `Create a folder inside ${selected}` : 'Select a parent folder first'}
+            onClick={() => setCreating(true)}
+          >
+            <FolderPlus size={12} /> New folder
+          </button>
+        )}
         <div className="flex items-center justify-between mt-1">
           <p className="text-xs opacity-50">Click to select · double-click or chevron to expand</p>
           <label className="flex items-center gap-1 text-xs cursor-pointer">
@@ -193,7 +252,7 @@ export function FolderPicker({
             disabled={!selected}
             onClick={() => selected && onSelect(selected)}
           >
-            Use this folder
+            {confirmLabel}
           </button>
         </div>
       </div>

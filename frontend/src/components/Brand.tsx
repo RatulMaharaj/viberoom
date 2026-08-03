@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { FolderOpen } from 'lucide-react'
 import { api } from '../api'
+import { useFolderChooser } from '../folderChooser'
 import { FolderPicker } from './FolderPicker'
 
 /** Logo with the current library folder underneath. Clicking the folder
@@ -8,6 +9,7 @@ import { FolderPicker } from './FolderPicker'
 export function Brand() {
   const [libraryPath, setLibraryPath] = useState<string | null>(null)
   const [showPicker, setShowPicker] = useState(false)
+  const { available: nativePicker, choose } = useFolderChooser()
 
   useEffect(() => {
     api.getLibrary().then((r) => setLibraryPath(r.library))
@@ -24,7 +26,11 @@ export function Brand() {
       <button
         className="flex items-center gap-1 text-xs opacity-70 hover:opacity-100"
         title={libraryPath ? `${libraryPath} — click to change folder` : 'Choose folder'}
-        onClick={() => setShowPicker(true)}
+        onClick={async () => {
+          if (!nativePicker) return setShowPicker(true)
+          const picked = await choose(libraryPath)
+          if (picked) openLibrary(picked)
+        }}
       >
         <FolderOpen size={11} fill="#e8b339" stroke="#e8b339" />
         <span className="max-w-40 truncate">

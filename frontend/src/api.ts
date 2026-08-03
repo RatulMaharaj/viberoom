@@ -77,6 +77,23 @@ export const api = {
       json<{ path: string | null; parent: string | null; dirs: string[] }>(r),
     ),
 
+  nativePickerAvailable: () =>
+    fetch(`${BASE}/fs/native-picker`).then((r) => json<{ available: boolean }>(r)),
+
+  nativePicker: (start?: string | null) =>
+    fetch(`${BASE}/fs/native-picker`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ start: start ?? null }),
+    }).then((r) => json<{ path: string | null; cancelled: boolean }>(r)),
+
+  mkdir: (parent: string, name: string) =>
+    fetch(`${BASE}/fs/mkdir`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parent, name }),
+    }).then((r) => json<{ path: string }>(r)),
+
   listImages: (f: Filters = {}) => {
     const params = new URLSearchParams()
     if (f.rating_gte) params.set('rating_gte', String(f.rating_gte))
@@ -135,7 +152,7 @@ export const api = {
       json<Record<string, any>>(r),
     ),
 
-  exportImage: (id: string, opts: { quality?: number; max_dimension?: number } = {}) =>
+  exportImage: (id: string, opts: Record<string, any> = {}) =>
     fetch(`${BASE}/images/${id}/export`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

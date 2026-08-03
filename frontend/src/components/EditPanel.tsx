@@ -12,14 +12,84 @@ interface SliderDef {
   max: number
   step: number
   def: number
-  /** colored rail hinting at the axis: temp, tint, dark-to-light, saturation */
-  rail?: 'temp' | 'tint' | 'luma' | 'sat'
+  /** colored rail hinting at the axis: temp, tint, dark-to-light, saturation, hue */
+  rail?: 'temp' | 'tint' | 'luma' | 'sat' | 'hue'
+  /** For `rail: 'hue'`: the slice of the color wheel this slider covers. Absent
+   *  means the whole wheel (an absolute 0-360 hue); a center+range means a
+   *  relative shift around one band, as the HSL mixer sliders do. */
+  hueSpan?: { center: number; range: number }
+}
+
+/** CSS gradient painting a hue rail with the hues it actually reaches. */
+const hueRail = (span?: { center: number; range: number }): string => {
+  const stops = span
+    ? [0, 0.25, 0.5, 0.75, 1].map((t) => span.center + (t * 2 - 1) * span.range)
+    : [0, 60, 120, 180, 240, 300, 360]
+  return `linear-gradient(to right, ${stops.map((h) => `hsl(${h} 85% 55%)`).join(', ')})`
+}
+
+/** A band a swatch row can select. `hue` colors the swatch and, for the mixer,
+ *  mirrors the band centers in engine/ops/color.py; `swatch` overrides it for
+ *  bands that aren't a hue (the tonal grading bands). */
+interface Channel {
+  key: string
+  label: string
+  hue?: number
+  swatch?: string
+}
+
+const swatchColor = (c: Channel) => c.swatch ?? `hsl(${c.hue ?? 0} 85% 55%)`
+
+const HSL_CHANNELS: Channel[] = [
+  { key: 'red', label: 'Red', hue: 0 },
+  { key: 'orange', label: 'Orange', hue: 30 },
+  { key: 'yellow', label: 'Yellow', hue: 60 },
+  { key: 'green', label: 'Green', hue: 120 },
+  { key: 'aqua', label: 'Aqua', hue: 180 },
+  { key: 'blue', label: 'Blue', hue: 240 },
+  { key: 'purple', label: 'Purple', hue: 280 },
+  { key: 'magenta', label: 'Magenta', hue: 320 },
+]
+
+/** The mixer's hue slider is a relative shift, and the engine caps it at +-30
+ *  degrees around the band center — so that's exactly what the rail shows. */
+const HSL_HUE_RANGE = 30
+
+const hslSliders = (c: Channel): SliderDef[] => [
+  { label: 'Hue', path: ['color', 'hsl', c.key, 'hue'], min: -100, max: 100, step: 1, def: 0, rail: 'hue', hueSpan: { center: c.hue ?? 0, range: HSL_HUE_RANGE } },
+  { label: 'Saturation', path: ['color', 'hsl', c.key, 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
+  { label: 'Luminance', path: ['color', 'hsl', c.key, 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+]
+
+/** Grading bands are tonal, not chromatic, so the swatches are a dark/mid/light
+ *  ramp rather than colors. */
+const GRADING_BANDS: Channel[] = [
+  { key: 'shadows', label: 'Shadows', swatch: '#2b2b2b' },
+  { key: 'midtones', label: 'Midtones', swatch: '#8a8a8a' },
+  { key: 'highlights', label: 'Highlights', swatch: '#e8e8e8' },
+]
+
+const gradingSliders = (c: Channel): SliderDef[] => [
+  { label: 'Hue', path: ['color', 'grading', c.key, 'hue'], min: 0, max: 360, step: 1, def: 0, rail: 'hue' },
+  { label: 'Saturation', path: ['color', 'grading', c.key, 'saturation'], min: 0, max: 100, step: 1, def: 0, rail: 'sat' },
+  { label: 'Luminance', path: ['color', 'grading', c.key, 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+]
+
+interface Group {
+  title: string
+  collapsed?: boolean
+  /** Shown as-is, or below the band sliders when `channels` is set. */
+  sliders?: SliderDef[]
+  /** When set, a swatch row picks which band `bandSliders` addresses, instead
+   *  of giving every band its own collapsible section. */
+  channels?: Channel[]
+  bandSliders?: (c: Channel) => SliderDef[]
 }
 
 /** Groups marked collapsed start folded — there are far more controls than
- *  fit on screen, and most shots never touch HSL or optics. */
+ *  fit on screen, and most shots never touch the mixer or optics. */
 
-const GROUPS: { title: string; sliders: SliderDef[]; collapsed?: boolean }[] = [
+const GROUPS: Group[] = [
   {
     title: 'White Balance',
     sliders: [
@@ -59,30 +129,15 @@ const GROUPS: { title: string; sliders: SliderDef[]; collapsed?: boolean }[] = [
     ],
   },
   {
-    title: 'Grading — Shadows',
+    title: 'Color Grading',
     collapsed: true,
+    channels: GRADING_BANDS,
+    bandSliders: gradingSliders,
+    // blending and balance act across all three bands, so they sit below the
+    // band picker rather than being repeated inside each one
     sliders: [
-      { label: 'Hue', path: ['color', 'grading', 'shadows', 'hue'], min: 0, max: 360, step: 1, def: 0 },
-      { label: 'Saturation', path: ['color', 'grading', 'shadows', 'saturation'], min: 0, max: 100, step: 1, def: 0, rail: 'sat' },
-      { label: 'Luminance', path: ['color', 'grading', 'shadows', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
-    ],
-  },
-  {
-    title: 'Grading — Midtones',
-    collapsed: true,
-    sliders: [
-      { label: 'Hue', path: ['color', 'grading', 'midtones', 'hue'], min: 0, max: 360, step: 1, def: 0 },
-      { label: 'Saturation', path: ['color', 'grading', 'midtones', 'saturation'], min: 0, max: 100, step: 1, def: 0, rail: 'sat' },
-      { label: 'Luminance', path: ['color', 'grading', 'midtones', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
-    ],
-  },
-  {
-    title: 'Grading — Highlights',
-    collapsed: true,
-    sliders: [
-      { label: 'Hue', path: ['color', 'grading', 'highlights', 'hue'], min: 0, max: 360, step: 1, def: 0 },
-      { label: 'Saturation', path: ['color', 'grading', 'highlights', 'saturation'], min: 0, max: 100, step: 1, def: 0, rail: 'sat' },
-      { label: 'Luminance', path: ['color', 'grading', 'highlights', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
+      { label: 'Blending', path: ['color', 'grading', 'blending'], min: 0, max: 100, step: 1, def: 50 },
+      { label: 'Balance', path: ['color', 'grading', 'balance'], min: -100, max: 100, step: 1, def: 0 },
     ],
   },
   {
@@ -118,86 +173,40 @@ const GROUPS: { title: string; sliders: SliderDef[]; collapsed?: boolean }[] = [
     ],
   },
   {
-    title: 'HSL — Red',
+    title: 'Color Mixer',
     collapsed: true,
-    sliders: [
-      { label: 'Hue', path: ['color', 'hsl', 'red', 'hue'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Saturation', path: ['color', 'hsl', 'red', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
-      { label: 'Luminance', path: ['color', 'hsl', 'red', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
-    ],
-  },
-  {
-    title: 'HSL — Orange',
-    collapsed: true,
-    sliders: [
-      { label: 'Hue', path: ['color', 'hsl', 'orange', 'hue'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Saturation', path: ['color', 'hsl', 'orange', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
-      { label: 'Luminance', path: ['color', 'hsl', 'orange', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
-    ],
-  },
-  {
-    title: 'HSL — Yellow',
-    collapsed: true,
-    sliders: [
-      { label: 'Hue', path: ['color', 'hsl', 'yellow', 'hue'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Saturation', path: ['color', 'hsl', 'yellow', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
-      { label: 'Luminance', path: ['color', 'hsl', 'yellow', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
-    ],
-  },
-  {
-    title: 'HSL — Green',
-    collapsed: true,
-    sliders: [
-      { label: 'Hue', path: ['color', 'hsl', 'green', 'hue'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Saturation', path: ['color', 'hsl', 'green', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
-      { label: 'Luminance', path: ['color', 'hsl', 'green', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
-    ],
-  },
-  {
-    title: 'HSL — Aqua',
-    collapsed: true,
-    sliders: [
-      { label: 'Hue', path: ['color', 'hsl', 'aqua', 'hue'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Saturation', path: ['color', 'hsl', 'aqua', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
-      { label: 'Luminance', path: ['color', 'hsl', 'aqua', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
-    ],
-  },
-  {
-    title: 'HSL — Blue',
-    collapsed: true,
-    sliders: [
-      { label: 'Hue', path: ['color', 'hsl', 'blue', 'hue'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Saturation', path: ['color', 'hsl', 'blue', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
-      { label: 'Luminance', path: ['color', 'hsl', 'blue', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
-    ],
-  },
-  {
-    title: 'HSL — Purple',
-    collapsed: true,
-    sliders: [
-      { label: 'Hue', path: ['color', 'hsl', 'purple', 'hue'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Saturation', path: ['color', 'hsl', 'purple', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
-      { label: 'Luminance', path: ['color', 'hsl', 'purple', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
-    ],
-  },
-  {
-    title: 'HSL — Magenta',
-    collapsed: true,
-    sliders: [
-      { label: 'Hue', path: ['color', 'hsl', 'magenta', 'hue'], min: -100, max: 100, step: 1, def: 0 },
-      { label: 'Saturation', path: ['color', 'hsl', 'magenta', 'saturation'], min: -100, max: 100, step: 1, def: 0, rail: 'sat' },
-      { label: 'Luminance', path: ['color', 'hsl', 'magenta', 'luminance'], min: -100, max: 100, step: 1, def: 0, rail: 'luma' },
-    ],
+    channels: HSL_CHANNELS,
+    bandSliders: hslSliders,
   },
 ]
 
-/** Does a folded group hold a non-default value? Drives the dot marker so
- *  edits can't hide inside a collapsed section. */
-const groupTouched = (recipe: any, g: { sliders: SliderDef[] }) =>
-  g.sliders.some((s) => {
+const bandSlidersOf = (g: Group, c: Channel): SliderDef[] => g.bandSliders?.(c) ?? []
+
+/** The sliders currently on screen for a group — for a channel group that is
+ *  the selected band's sliders, followed by any shared ones. */
+const visibleSliders = (g: Group, channel: string): SliderDef[] => {
+  const shared = g.sliders ?? []
+  if (!g.channels) return shared
+  const c = g.channels.find((x) => x.key === channel) ?? g.channels[0]
+  return [...bandSlidersOf(g, c), ...shared]
+}
+
+/** Every slider a group owns, including bands not currently selected. */
+const allSliders = (g: Group): SliderDef[] => [
+  ...(g.channels?.flatMap((c) => bandSlidersOf(g, c)) ?? []),
+  ...(g.sliders ?? []),
+]
+
+const touched = (recipe: any, sliders: SliderDef[]) =>
+  sliders.some((s) => {
     const v = getAt(recipe, s.path)
     return v != null && v !== s.def
   })
+
+/** Does a folded group hold a non-default value? Drives the dot marker so
+ *  edits can't hide inside a collapsed section — or, for the mixer, inside an
+ *  unselected band. */
+const groupTouched = (recipe: any, g: Group) => touched(recipe, allSliders(g))
 
 const getAt = (obj: any, path: string[]) => path.reduce((o, k) => o?.[k], obj)
 const patchFor = (path: string[], value: number | null): object =>
@@ -245,6 +254,8 @@ export function EditPanel({
   const [folded, setFolded] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(GROUPS.filter((g) => g.collapsed).map((g) => [g.title, true])),
   )
+  /** selected band per channel-group, keyed by group title */
+  const [channel, setChannel] = useState<Record<string, string>>({})
   const [versionTick, setVersionTick] = useState(0)
   const [recipe, setRecipeState] = useState<Record<string, any> | null>(null)
   const recipeRef = useRef<Record<string, any> | null>(null)
@@ -357,7 +368,9 @@ export function EditPanel({
           </button>
         </div>
       </div>
-      {GROUPS.map((g) => (
+      {GROUPS.map((g) => {
+        const active = channel[g.title] ?? g.channels?.[0].key ?? ''
+        return (
         <div key={g.title} className="px-4 py-2 border-b border-base-300/30 last:border-0">
           <button
             className="w-full flex items-center gap-1 text-xs font-bold opacity-60 uppercase tracking-wide mb-1 hover:opacity-100"
@@ -372,13 +385,54 @@ export function EditPanel({
               <span className="badge badge-xs badge-primary ml-auto">•</span>
             )}
           </button>
-          {!folded[g.title] && g.sliders.map((s) => {
+          {!folded[g.title] && g.channels && (
+            <div className="mb-2">
+              {/* many bands stay square to fit the row; a few would look like
+                  giant tiles, so they get a shorter bar instead */}
+              <div
+                className="grid gap-1"
+                style={{ gridTemplateColumns: `repeat(${g.channels.length}, minmax(0, 1fr))` }}
+              >
+                {g.channels.map((c) => {
+                  const isActive = c.key === active
+                  const edited = touched(recipe, bandSlidersOf(g, c))
+                  return (
+                    <button
+                      key={c.key}
+                      type="button"
+                      title={c.label}
+                      aria-label={c.label}
+                      aria-pressed={isActive}
+                      className={`relative rounded-md border border-base-content/15 transition ${
+                        g.channels!.length > 4 ? 'aspect-square' : 'h-7'
+                      } ${
+                        isActive
+                          ? 'ring-2 ring-primary ring-offset-1 ring-offset-base-200'
+                          : 'opacity-70 hover:opacity-100'
+                      }`}
+                      style={{ background: swatchColor(c) }}
+                      onClick={() => setChannel((m) => ({ ...m, [g.title]: c.key }))}
+                    >
+                      {/* a band with edits stays visible even when unselected */}
+                      {edited && (
+                        <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-base-content ring-1 ring-base-200" />
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="text-xs opacity-60 mt-1">
+                {g.channels.find((c) => c.key === active)?.label}
+              </div>
+            </div>
+          )}
+          {!folded[g.title] && visibleSliders(g, active).map((s) => {
             const isTemp = s.label === 'Temp'
             const raw = getAt(recipe, s.path)
             const value = raw ?? s.def
             const disabled = isTemp && asShot
             return (
-              <div key={s.label} className="mb-1.5">
+              <div key={s.path.join('.')} className="mb-1.5">
                 <div className="flex justify-between text-xs">
                   <button
                     className="hover:underline"
@@ -394,6 +448,11 @@ export function EditPanel({
                 <input
                   type="range"
                   className={`vr-slider ${s.rail ? `vr-slider-${s.rail}` : ''}`}
+                  style={
+                    s.rail === 'hue'
+                      ? ({ '--vr-rail': hueRail(s.hueSpan) } as React.CSSProperties)
+                      : undefined
+                  }
                   min={s.min}
                   max={s.max}
                   step={s.step}
@@ -426,7 +485,8 @@ export function EditPanel({
             )
           })}
         </div>
-      ))}
+        )
+      })}
 
       <DevelopExtras
         imageId={imageId}

@@ -5,6 +5,7 @@ import { api, type Flag, type ImageMeta } from '../api'
 import { FlagBadge, RatingStars } from '../components/RatingStars'
 import { Brand } from '../components/Brand'
 import { CropTool } from '../components/CropTool'
+import { ExportDialog } from '../components/ExportDialog'
 import { EditPanel } from '../components/EditPanel'
 import { ModuleTabs } from '../components/ModuleTabs'
 import { ZoomableImage } from '../components/ZoomableImage'
@@ -20,8 +21,6 @@ export function Edit() {
   const [image, setImage] = useState<ImageMeta | null>(null)
   const [siblings, setSiblings] = useState<ImageMeta[]>([])
   const [bust, setBust] = useState('')
-  const [exporting, setExporting] = useState(false)
-  const [exportPath, setExportPath] = useState<string | null>(null)
   const [fullscreen, setFullscreen] = useState(false)
   const [zoomed, setZoomed] = useState(false)
   const [hovered, setHovered] = useState<ImageMeta | null>(null)
@@ -31,6 +30,7 @@ export function Edit() {
   const [renderTick, setRenderTick] = useState(0)
   const [cropMode, setCropMode] = useState(false)
   const [proof, setProof] = useState<string | null>(null)
+  const [exportOpen, setExportOpen] = useState(false)
 
   const refreshAll = useCallback(() => {
     setBust(String(Date.now()))
@@ -44,7 +44,6 @@ export function Edit() {
 
   useEffect(() => {
     load()
-    setExportPath(null)
     setShowBefore(false)
   }, [load])
 
@@ -144,18 +143,6 @@ export function Edit() {
     api.setFlag(id, flag).then(load)
   }
 
-  const doExport = async () => {
-    if (!id) return
-    setExporting(true)
-    setExportPath(null)
-    try {
-      const r = await api.exportImage(id, { quality: 90 })
-      setExportPath(r.path)
-    } finally {
-      setExporting(false)
-    }
-  }
-
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {!fullscreen && (
@@ -179,27 +166,18 @@ export function Edit() {
             <button className="btn btn-sm btn-ghost" title="Fullscreen (F)" onClick={toggleFullscreen}>
             <Maximize size={14} />
           </button>
-          <button className="btn btn-sm btn-primary" onClick={doExport} disabled={exporting || !id}>
-            {exporting ? (
-              <span className="loading loading-spinner loading-xs" />
-            ) : (
-              <>
-                <Download size={14} /> Export JPEG
-              </>
-            )}
+          <button
+            className="btn btn-sm btn-primary"
+            onClick={() => setExportOpen(true)}
+            disabled={!id}
+          >
+            <Download size={14} /> Export…
           </button>
           <div className="divider divider-horizontal mx-0" />
           <ModuleTabs active="develop" imageId={id} />
         </div>
       )}
 
-      {exportPath && !fullscreen && (
-        <div className="alert alert-success text-xs py-1 rounded-none gap-1.5">
-          <Download size={14} />
-          Exported <span className="font-mono" title={exportPath}>{exportPath.split('/').pop()}</span>
-          <span className="opacity-60">in {exportPath.split('/').slice(-2, -1)[0]}/</span>
-        </div>
-      )}
 
       <div className="flex-1 min-h-0 flex">
       <div className="flex-1 min-h-0 relative flex items-center justify-center bg-base-300">
@@ -263,6 +241,10 @@ export function Edit() {
         />
       )}
       </div>
+
+      {exportOpen && id && (
+        <ExportDialog imageIds={[id]} onClose={() => setExportOpen(false)} />
+      )}
 
       {!fullscreen && (
         <>

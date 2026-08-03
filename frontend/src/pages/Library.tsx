@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Boxes, ArrowDown, ArrowUp, FolderOpen, RefreshCw } from 'lucide-react'
+import { Boxes, ArrowDown, ArrowUp, CheckSquare, Download, FolderOpen, RefreshCw, Square } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { api, type Filters, type Flag, type ImageMeta } from '../api'
 import { FlagBadge, RatingStars } from '../components/RatingStars'
 import { Brand } from '../components/Brand'
+import { useFolderChooser } from '../folderChooser'
+import { ExportDialog } from '../components/ExportDialog'
 import { OrganizePanel } from '../components/OrganizePanel'
 import { FolderPicker } from '../components/FolderPicker'
 import { ModuleTabs } from '../components/ModuleTabs'
@@ -36,6 +38,8 @@ export function Library() {
   const [multi, setMulti] = useState<string[]>([])
   const [idFilter, setIdFilter] = useState<string[] | null>(null)
   const [organize, setOrganize] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const { available: nativePicker, choose } = useFolderChooser()
 
   const refresh = useCallback(() => {
     api
@@ -136,9 +140,23 @@ export function Library() {
               Open
             </button>
           </div>
-          <button className="btn btn-ghost btn-sm" onClick={() => setShowPicker(true)}>
-            <FolderOpen size={14} fill="#e8b339" stroke="#e8b339" /> Browse folders…
-          </button>
+          <div className="flex gap-2">
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={async () => {
+                if (!nativePicker) return setShowPicker(true)
+                const picked = await choose(null)
+                if (picked) openLibrary(picked)
+              }}
+            >
+              <FolderOpen size={14} fill="#e8b339" stroke="#e8b339" /> Browse folders…
+            </button>
+            {nativePicker && (
+              <button className="btn btn-ghost btn-sm" onClick={() => setShowPicker(true)}>
+                Use the in-app tree
+              </button>
+            )}
+          </div>
           {error && <div className="alert alert-error text-sm">{error}</div>}
           {showPicker && (
             <FolderPicker
@@ -222,6 +240,25 @@ export function Library() {
           <RefreshCw size={14} /> Rescan
         </button>
         <button
+          className="btn btn-sm"
+          title={multi.length ? 'Clear selection' : 'Select all shown'}
+          onClick={() => {
+            const shown = images.filter((im) => !idFilter || idFilter.includes(im.id))
+            setMulti(multi.length ? [] : shown.map((im) => im.id))
+          }}
+        >
+          {multi.length ? <Square size={14} /> : <CheckSquare size={14} />}
+          {multi.length ? `${multi.length} selected` : 'Select all'}
+        </button>
+        <button
+          className="btn btn-sm btn-primary"
+          title="Export the selection (or the current image)"
+          disabled={!multi.length && !selected}
+          onClick={() => setExportOpen(true)}
+        >
+          <Download size={14} /> Export…
+        </button>
+        <button
           className={`btn btn-sm ${organize ? 'btn-primary' : ''}`}
           title="Collections, stacks, merge, import, faces, map, tether"
           onClick={() => setOrganize((v) => !v)}
@@ -286,6 +323,12 @@ export function Library() {
           <p className="opacity-60 col-span-full text-center py-16">No images match.</p>
         )}
       </div>
+      {exportOpen && (
+        <ExportDialog
+          imageIds={multi.length ? multi : selected ? [selected] : []}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
       {organize && (
         <OrganizePanel
           selection={multi}
