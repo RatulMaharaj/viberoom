@@ -41,7 +41,18 @@ export interface ScannedFile {
 }
 
 /** Recursive walk. Skips dotted names and `exports/` exactly as the Python
- *  scanner does, so both modes see the same set of photos. */
+ *  scanner does, so both modes see *almost* the same set of photos.
+ *
+ *  The exception is symlinks, and it is not fixable here: Chrome's directory
+ *  iterator does not yield them at all — not as a file, not as a directory,
+ *  not as an error — while Python's `os.walk` follows them. A folder of
+ *  aliases pointing at photos elsewhere is empty to this walk and full to the
+ *  server's. Confirmed in Chrome against a folder of 7 symlinked RAWs and 2
+ *  real PNGs: only the 2 came back.
+ *
+ *  There is no count to report, because a skipped entry never reaches this
+ *  loop to be counted. Do not spend an hour looking for one. It bites test
+ *  folders and libraries assembled from aliases, not ordinary photo folders. */
 export async function walkLibrary(
   root: FileSystemDirectoryHandle,
   prefix = '',

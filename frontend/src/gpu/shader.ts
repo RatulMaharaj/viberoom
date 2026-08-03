@@ -13,8 +13,17 @@
  *  hand the blurs a darkened frame, and a large-radius clarity or dehaze blur
  *  spreads that darkening back inward — a visible halo, not a rounding error.
  *
- *  Lens, geometry, LUTs, masks, retouch and grain are later stages; a recipe
- *  that uses any of them never reaches this shader (see support.ts).
+ *  Stage 3 lives here too, in its own programs rather than in the edit pass,
+ *  because none of it is pointwise in the same frame:
+ *    - `LENS_SOURCE` runs *before* the edit pass, on linear light, and
+ *      resamples the frame radially.
+ *    - `GEOM_SOURCE` runs after detail and before the vignette, and is the one
+ *      pass whose output is a different size from its input.
+ *    - the LUT is the exception: it *is* pointwise, so it folds into the edit
+ *      pass at one of two points (see `uLutStage`).
+ *
+ *  Masks, retouch and grain are later stages still; a recipe that uses any of
+ *  them never reaches this shader (see support.ts).
  *
  *  Every formula below is transcribed from the corresponding op rather than
  *  re-derived, including the parts that look redundant. Where the Python
@@ -49,6 +58,8 @@ precision highp sampler2D;
 
 uniform sampler2D uSource;
 uniform sampler2D uCurves;
+uniform highp sampler3D uLut3;
+uniform sampler2D uLut1;
 
 uniform vec3  uWbGain;
 uniform float uExposure;      // EV stops
@@ -64,6 +75,10 @@ uniform float uGradeExp;      // p + 1
 uniform float uGradeBalance;  // balance/100 * 0.25
 uniform vec3  uGradeTint[3];  // chroma offset, strength already folded in
 uniform vec3  uGradeLum;      // per band: luminance/100 * 0.4
+uniform int   uLutKind;       // 0 none, 1 = a 1-D table, 3 = a 3-D cube
+uniform int   uLutSize;       // entries per axis
+uniform float uLutStrength;   // strength / 100
+uniform int   uLutStage;      // 0 = "pre" (just after gamma), 1 = "post"
 
 out vec4 fragColor;
 
@@ -82,6 +97,49 @@ float srgbEncode(float v) {
 float curveAt(float v, int row) {
   int idx = clamp(int(clamp(v, 0.0, 1.0) * 1023.0), 0, ${CURVE_SIZE - 1});
   return texelFetch(uCurves, ivec2(idx, row), 0).r;
+}
+
+/** engine/ops/lut.py apply_lut, both kinds.
+ *
+ *  The trilinear blend is written out rather than left to a LINEAR sampler.
+ *  Hardware filtering would be the obvious way to do it — trilinear *is*
+ *  _apply_3d — but the weights a sampler uses are fixed-point (commonly 8
+ *  bits of subtexel precision), and a LINEAR-filterable float format is an
+ *  extension besides. Eight texelFetches and the arithmetic spelled out cost a
+ *  few instructions on a pass that is already bandwidth-bound, and they are
+ *  bit-comparable with the Python instead of nearly so.
+ */
+vec3 applyLut(vec3 c) {
+  vec3 x = clamp(c, 0.0, 1.0);
+  vec3 m;
+  if (uLutKind == 3) {
+    vec3 p = x * float(uLutSize - 1);
+    ivec3 i0 = clamp(ivec3(p), ivec3(0), ivec3(uLutSize - 2));
+    vec3 f = p - vec3(i0);
+    // The cube is indexed [b][g][r], so the texture's x axis is red.
+    vec3 c000 = texelFetch(uLut3, i0 + ivec3(0, 0, 0), 0).rgb;
+    vec3 c100 = texelFetch(uLut3, i0 + ivec3(1, 0, 0), 0).rgb;
+    vec3 c010 = texelFetch(uLut3, i0 + ivec3(0, 1, 0), 0).rgb;
+    vec3 c110 = texelFetch(uLut3, i0 + ivec3(1, 1, 0), 0).rgb;
+    vec3 c001 = texelFetch(uLut3, i0 + ivec3(0, 0, 1), 0).rgb;
+    vec3 c101 = texelFetch(uLut3, i0 + ivec3(1, 0, 1), 0).rgb;
+    vec3 c011 = texelFetch(uLut3, i0 + ivec3(0, 1, 1), 0).rgb;
+    vec3 c111 = texelFetch(uLut3, i0 + ivec3(1, 1, 1), 0).rgb;
+    vec3 c0 = mix(mix(c000, c100, f.r), mix(c010, c110, f.r), f.g);
+    vec3 c1 = mix(mix(c001, c101, f.r), mix(c011, c111, f.r), f.g);
+    m = mix(c0, c1, f.b);
+  } else {
+    // np.interp over np.linspace(0, 1, n): three independent channel curves.
+    vec3 p = x * float(uLutSize - 1);
+    ivec3 i0 = clamp(ivec3(p), ivec3(0), ivec3(uLutSize - 2));
+    vec3 f = p - vec3(i0);
+    for (int ch = 0; ch < 3; ch++) {
+      float a = texelFetch(uLut1, ivec2(i0[ch], 0), 0)[ch];
+      float b = texelFetch(uLut1, ivec2(i0[ch] + 1, 0), 0)[ch];
+      m[ch] = mix(a, b, f[ch]);
+    }
+  }
+  return x * (1.0 - uLutStrength) + clamp(m, 0.0, 1.0) * uLutStrength;
 }
 
 vec3 rgb2hsv(vec3 c) {
@@ -137,6 +195,8 @@ void main() {
   // ---- display space ----
   c = vec3(srgbEncode(c.r), srgbEncode(c.g), srgbEncode(c.b));
 
+  if (uLutKind != 0 && uLutStage == 0) c = applyLut(c);
+
   vec3 x = clamp(c, 0.0, 1.0);
   vec3 sig = 1.0 / (1.0 + exp(-uContrast.x * 4.0 * (x - 0.5)));
   sig = (sig - uContrast.y) / (uContrast.z - uContrast.y);
@@ -184,7 +244,163 @@ void main() {
     c = clamp(g, 0.0, 1.0);
   }
 
+  if (uLutKind != 0 && uLutStage == 1) c = applyLut(c);
+
   fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+}`
+
+/** engine/ops/lens.py `apply_lens`, minus defringe.
+ *
+ *  Runs first, on linear light, so it reads the uploaded source frame and the
+ *  edit pass reads *this* instead. Three things about it are load-bearing:
+ *
+ *  - The bilinear blend is spelled out over four texelFetches rather than left
+ *    to a LINEAR sampler. `_plan` clamps its sample coordinate to `w - 1.001`
+ *    and then floors it, so the last texel column is only ever reached as the
+ *    0.999 end of a blend with its neighbour. A hardware sampler with
+ *    CLAMP_TO_EDGE reaches it a different way, and the two disagree along the
+ *    right and bottom edges — a one-pixel seam that a preview shows and the
+ *    server render does not.
+ *  - A channel with no distortion *and* no CA of its own is copied, not
+ *    resampled, exactly as `_plan`'s `scale == 1.0` short circuit does. With
+ *    distortion on, `base` is an array and the Python cannot take that branch,
+ *    so neither does this — hence a per-channel flag rather than a comparison
+ *    against 1.0 here.
+ *  - The vignette gain uses the radius of the *destination* pixel, applied to
+ *    the already-resampled colour, and the only clamp at the end is the lower
+ *    one: `np.clip(out, 0, None)` keeps highlight headroom for the ops above.
+ *
+ *  `_defringe` is absent on purpose. It thresholds on `np.percentile(edge, 99)`
+ *  over the whole frame, and a fragment shader has no way to reduce over the
+ *  frame it is drawing; approximating the percentile would change the mask, so
+ *  support.ts refuses any recipe with defringe instead.
+ */
+export const LENS_SOURCE = `#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D uSrc;
+uniform ivec2 uSize;
+uniform vec2  uCenter;     // (w - 1) / 2, (h - 1) / 2
+uniform float uNorm;       // sqrt(cx^2 + cy^2)
+uniform float uK;          // distortion / 100 * 0.15
+uniform float uVig;        // vignette / 100 * 0.8
+uniform vec3  uCaScale;    // per channel: 1 + ca / 100 * 0.001
+uniform vec3  uRemap;      // per channel: 1 when it must be resampled at all
+out vec4 fragColor;
+
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  float dx = float(px.x) - uCenter.x;
+  float dy = float(px.y) - uCenter.y;
+  float r = sqrt(dx * dx + dy * dy) / uNorm;
+  float base = uK != 0.0 ? 1.0 + uK * r * r : 1.0;
+
+  vec3 c;
+  for (int i = 0; i < 3; i++) {
+    if (uRemap[i] < 0.5) {
+      c[i] = texelFetch(uSrc, px, 0)[i];
+      continue;
+    }
+    float s = base * uCaScale[i];
+    float sx = clamp(uCenter.x + dx * s, 0.0, float(uSize.x) - 1.001);
+    float sy = clamp(uCenter.y + dy * s, 0.0, float(uSize.y) - 1.001);
+    int x0 = int(sx);
+    int y0 = int(sy);
+    float fx = sx - float(x0);
+    float fy = sy - float(y0);
+    float top = texelFetch(uSrc, ivec2(x0, y0), 0)[i] * (1.0 - fx)
+              + texelFetch(uSrc, ivec2(x0 + 1, y0), 0)[i] * fx;
+    float bot = texelFetch(uSrc, ivec2(x0, y0 + 1), 0)[i] * (1.0 - fx)
+              + texelFetch(uSrc, ivec2(x0 + 1, y0 + 1), 0)[i] * fx;
+    c[i] = top * (1.0 - fy) + bot * fy;
+  }
+
+  c *= 1.0 + uVig * r * r;
+  fragColor = vec4(max(c, 0.0), 1.0);
+}`
+
+/** engine/ops/geometry.py `apply_geometry`, as a sampling transform.
+ *
+ *  One program, run one to three times. The op is five steps, but only two of
+ *  them resample — the perspective warp and the straighten — and the other
+ *  three (orientation, flips, crop) are exact index permutations that fold
+ *  into a neighbouring pass for free:
+ *
+ *    orientation -> `uOrient`, applied to every *input* fetch, taps included.
+ *      A rot90 is a relabelling of the grid, so a bicubic taken through it is
+ *      the same bicubic; folding it in costs one pass fewer than doing it.
+ *    flips + crop -> `uOrigin` / `uSign`, applied to the *output* index of the
+ *      last pass. Cropping is then a viewport that starts somewhere else, and
+ *      a flip is a negative step through it.
+ *
+ *  The two resampling steps stay separate passes because the Python does two
+ *  bicubics with a clamp between them, and one bicubic through the composed
+ *  matrix is a visibly different (sharper) result.
+ *
+ *  `cubicW` is PIL's kernel with **a = -1**, not the a = -0.5 Catmull-Rom that
+ *  most references give — measured against `Image.transform`, not assumed.
+ *  Taps clamp to the edge, but a *sample position* outside [-0.5, size - 0.5)
+ *  produces black, which is how PIL's generic transform fills the corners a
+ *  straighten leaves empty.
+ */
+export const GEOM_SOURCE = `#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D uSrc;
+uniform ivec2 uSrcSize;    // texels in uSrc, before uOrient
+uniform ivec2 uInSize;     // logical input extent, after uOrient
+uniform int   uOrient;     // rot90 count, 0-3
+uniform ivec2 uOrigin;     // logical output index of fragment (0, 0)
+uniform ivec2 uSign;       // +1, or -1 for a flipped axis
+uniform mat3  uMap;        // output (x + 0.5) -> input (x + 0.5), projective
+uniform int   uResample;   // 0 = exact permutation, 1 = bicubic
+out vec4 fragColor;
+
+/** A logical index in the oriented frame -> the texel that holds it. */
+ivec2 oriented(ivec2 p) {
+  if (uOrient == 1) return ivec2(uSrcSize.x - 1 - p.y, p.x);
+  if (uOrient == 2) return ivec2(uSrcSize.x - 1 - p.x, uSrcSize.y - 1 - p.y);
+  if (uOrient == 3) return ivec2(p.y, uSrcSize.y - 1 - p.x);
+  return p;
+}
+
+float cubicW(float t) {
+  float x = abs(t);
+  if (x < 1.0) return x * x * x - 2.0 * x * x + 1.0;
+  if (x < 2.0) return -(x * x * x - 5.0 * x * x + 8.0 * x - 4.0);
+  return 0.0;
+}
+
+void main() {
+  ivec2 idx = uOrigin + uSign * ivec2(gl_FragCoord.xy);
+
+  if (uResample == 0) {
+    ivec2 q = clamp(idx, ivec2(0), uInSize - 1);
+    fragColor = vec4(texelFetch(uSrc, oriented(q), 0).rgb, 1.0);
+    return;
+  }
+
+  vec3 hom = uMap * vec3(vec2(idx) + 0.5, 1.0);
+  vec2 s = hom.xy / hom.z - 0.5;
+  if (s.x < -0.5 || s.y < -0.5
+      || s.x >= float(uInSize.x) - 0.5 || s.y >= float(uInSize.y) - 0.5) {
+    fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+
+  ivec2 i0 = ivec2(floor(s));
+  vec3 acc = vec3(0.0);
+  for (int j = -1; j <= 2; j++) {
+    float wy = cubicW(float(i0.y + j) - s.y);
+    for (int i = -1; i <= 2; i++) {
+      float wx = cubicW(float(i0.x + i) - s.x);
+      ivec2 q = clamp(i0 + ivec2(i, j), ivec2(0), uInSize - 1);
+      acc += wy * wx * texelFetch(uSrc, oriented(q), 0).rgb;
+    }
+  }
+  // _resample clips: bicubic overshoots at hard edges and the uint8 path it
+  // replaced clamped as a side effect of its own conversion.
+  fragColor = vec4(clamp(acc, 0.0, 1.0), 1.0);
 }`
 
 /** engine/ops/effects.py `apply_vignette`. Its own pass because it runs after

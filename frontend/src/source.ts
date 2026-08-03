@@ -32,6 +32,10 @@ export type { Filters, Flag, ImageMeta }
 export interface SourceUrl {
   url: string
   release: () => void
+  /** What the pixels actually are. The server always renders the full recipe;
+   *  the browser renders what its shader can and otherwise hands back the
+   *  untouched original, which the UI has to be able to say out loud. */
+  rendered?: 'server' | 'gpu' | 'original'
 }
 
 export interface PreviewOpts {
@@ -79,10 +83,15 @@ export interface PhotoSource {
   /** The original bytes, for the GPU renderer and the RAW decoder. Null when
    *  the source cannot hand out the file itself (the server never can). */
   getFile(id: string): Promise<File | null>
+
+  /** Told when rows the source already returned have changed underneath —
+   *  locally, that is EXIF arriving after the grid has painted. Absent on the
+   *  server, which has read everything before it answers at all. */
+  subscribe?(listener: () => void): () => void
 }
 
 /** Server URLs need no cleanup, but callers should not have to know that. */
-const plain = (url: string): SourceUrl => ({ url, release: () => {} })
+const plain = (url: string): SourceUrl => ({ url, release: () => {}, rendered: 'server' })
 
 /** The status quo: delegate straight to the existing REST client. Wrapping it
  *  rather than reshaping it keeps this wave a no-op for the running app. */

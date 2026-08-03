@@ -13,7 +13,17 @@ import {
  *  permission revoked, and re-granting it needs a real click. So a returning
  *  user gets "Reconnect", not a silent empty library.
  */
-export function LibraryPicker({ onOpen }: { onOpen: () => Promise<unknown> }) {
+export function LibraryPicker({
+  onOpen,
+  onReconnect,
+}: {
+  /** Show the directory picker. Runs inside the click, as the API requires. */
+  onOpen: () => Promise<unknown>
+  /** Re-read the folder we already had, once permission is back. Distinct from
+   *  `onOpen` because prompting for a folder the user already chose would be a
+   *  strange thing to do to them. */
+  onReconnect: () => Promise<unknown>
+}) {
   const [needsPermission, setNeedsPermission] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const supported = fileSystemAccessSupported()
@@ -55,7 +65,7 @@ export function LibraryPicker({ onOpen }: { onOpen: () => Promise<unknown> }) {
               run(async () => {
                 if (!(await regrantLibrary())) throw new Error('Permission denied')
                 setNeedsPermission(false)
-                await onOpen()
+                await onReconnect()
               })
             }
           >

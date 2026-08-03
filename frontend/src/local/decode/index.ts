@@ -8,9 +8,10 @@
 
 import { decodeBitmapBlob } from './bitmap.ts'
 import { decodeCache, fileKey } from './cache.ts'
+import { linearToBitmap, orientBitmap } from './display.ts'
 import { downscaleLinear, previewScale } from './downscale.ts'
 import { metadataFromLibRaw, readExif, type ImageMetadata } from './exif.ts'
-import { decodeRawBuffer, readRawMetadata, UnsupportedRawError } from './raw.ts'
+import { decodeRawBuffer, rawThumbnail, readRawMetadata, UnsupportedRawError } from './raw.ts'
 import { encodeSource, type SourceFormat, type SourceFrame } from './source.ts'
 import { isRaw, isSupported, type LinearImage } from './types.ts'
 
@@ -19,11 +20,12 @@ export type { SourceFormat, SourceFrame } from './source.ts'
 export type { ExifSummary, ImageMetadata, RawExif } from './exif.ts'
 export { metadataFromLibRaw, readExif } from './exif.ts'
 export { DecodeCache, decodeCache, fileKey } from './cache.ts'
+export { linearToBitmap, orientBitmap } from './display.ts'
 export { downscaleLinear, previewScale, resizeLinear } from './downscale.ts'
 export { encodeRgb9e5, encodeRgba16f, encodeSource } from './source.ts'
 export { extensionOf, isRaw, isSupported } from './types.ts'
-export { readRawMetadata, setRawDecoderFactory, UnsupportedRawError } from './raw.ts'
-export type { RawDecoder } from './raw.ts'
+export { rawThumbnail, readRawMetadata, setRawDecoderFactory, UnsupportedRawError } from './raw.ts'
+export type { RawDecoder, RawThumbnail } from './raw.ts'
 
 /**
  * Decode one image to linear float32 RGB.
@@ -64,6 +66,40 @@ export async function readMetadata(file: File): Promise<ImageMetadata> {
  *  and every step back through a filmstrip — pay LibRaw once. */
 export function decodeCached(file: File): Promise<LinearImage> {
   return decodeCache.get(fileKey(file), () => decodeRaw(file))
+}
+
+/**
+ * A bitmap no wider than `maxWidth`, as cheaply as the file allows.
+ *
+ * The grid asks for one of these per tile, so the ordering matters more than
+ * the fidelity does: LibRaw's embedded preview first, because a full RAW
+ * decode is 0.6-9 seconds and a folder of them would leave the grid grey for
+ * minutes; the real decode only when the camera embedded nothing usable.
+ *
+ * The slow path shares `decodeCache` with the preview renderer, so a RAW that
+ * had to be decoded for its thumbnail is already in memory when the user opens
+ * it in the loupe.
+ */
+export async function thumbnailBitmap(file: File, maxWidth: number): Promise<ImageBitmap> {
+  if (!isRaw(file.name)) {
+    return createImageBitmap(file, {
+      resizeWidth: maxWidth,
+      resizeQuality: 'high',
+      imageOrientation: 'from-image',
+    })
+  }
+
+  const thumb = await rawThumbnail(await file.arrayBuffer())
+  if (thumb) {
+    // The embedded JPEG normally carries no EXIF of its own; `from-image` is
+    // still asked for in case it does, and `orientBitmap` handles the usual
+    // case from LibRaw's separately-reported flip.
+    const bitmap = await createImageBitmap(thumb.blob, { imageOrientation: 'from-image' })
+    return orientBitmap(bitmap, thumb.flip, maxWidth)
+  }
+
+  const full = await decodeCached(file)
+  return linearToBitmap(downscaleLinear(full, previewScale(full, maxWidth)))
 }
 
 /**

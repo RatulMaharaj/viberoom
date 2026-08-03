@@ -81,8 +81,17 @@ export const RECIPE_DEFAULTS: Record<string, any> = {
   masks: [],
 }
 
-/** Everything the shader reproduces exactly. Geometry, LUTs, masks, retouch
- *  and grain are later stages and are absent on purpose.
+/** Everything the shader reproduces exactly. Masks, retouch and grain are
+ *  later stages and are absent on purpose.
+ *
+ *  `lens.defringe` is absent too, and permanently: it thresholds on
+ *  `np.percentile(edge, 99)` taken over the entire frame. A fragment shader
+ *  cannot reduce over the frame it is drawing, and a sampled or approximated
+ *  percentile picks a different threshold, which moves the mask — so the rest
+ *  of `lens` is implemented and defringe alone forces the fallback.
+ *
+ *  `color.lut` is conditional rather than listed, since whether the shader can
+ *  draw it depends on whether the *data* is loaded — see `gpuSupportsRecipe`.
  *
  *  So is `detail`, which the shader *does* implement — see shader.ts's gauss,
  *  NR and sharpen passes. Its radii are absolute pixel counts, so reproducing
@@ -95,6 +104,16 @@ export const RECIPE_DEFAULTS: Record<string, any> = {
  *  point this list is the only thing that has to change.
  */
 const IMPLEMENTED: string[][] = [
+  ['lens', 'distortion'],
+  ['lens', 'vignette'],
+  ['lens', 'caRed'],
+  ['lens', 'caBlue'],
+  ['geometry', 'rotate'],
+  ['geometry', 'orientation'],
+  ['geometry', 'flipH'],
+  ['geometry', 'flipV'],
+  ['geometry', 'perspective'],
+  ['geometry', 'crop'],
   ['whiteBalance', 'temp'],
   ['whiteBalance', 'tint'],
   ['tone', 'exposure'],
@@ -142,14 +161,42 @@ function isDefault(value: any, def: any): boolean {
   return Object.keys(value).every((k) => isDefault(value[k], def[k]))
 }
 
+/** What the caller knows about the LUT the renderer is currently holding. */
+export interface SupportContext {
+  /** True when this renderer has been handed the named LUT's data via
+   *  `GpuRenderer.setLut`. Absent means "no LUTs are available", which is the
+   *  safe default: the engine would find the file and apply it, so a shader
+   *  that cannot is a wrong preview, not a slow one. */
+  hasLut?: (name: string) => boolean
+}
+
 /**
  * Can the shader draw this recipe faithfully?
  *
- * Note the vignette: the engine applies it *after* geometry, so it tracks the
- * cropped frame. The shader has no crop, which is only consistent because a
- * recipe with any crop is rejected here in the first place.
+ * The vignette used to be a caveat here — the engine applies it *after*
+ * geometry, so it tracks the cropped frame, and a shader with no crop was only
+ * consistent because crops were rejected outright. Both stages now exist and
+ * run in that order, so the two agree for real rather than by exclusion.
+ *
+ * The LUT is the one op whose support is not a property of the recipe alone.
+ * The engine resolves `lut.name` against `~/.viberoom/luts`; the renderer has
+ * no filesystem and is handed LUT *data* instead. So a recipe naming a LUT is
+ * drawable only if the caller confirms that renderer holds it.
  */
-export function gpuSupportsRecipe(recipe: any): boolean {
+export function gpuSupportsRecipe(recipe: any, ctx: SupportContext = {}): boolean {
   if (!recipe || typeof recipe !== 'object') return false
-  return isDefault(prune(recipe, IMPLEMENTED), prune(RECIPE_DEFAULTS, IMPLEMENTED))
+  const lut = recipe.color?.lut
+  const paths = lut && lutIsDrawable(lut, ctx) ? [...IMPLEMENTED, ['color', 'lut']] : IMPLEMENTED
+  return isDefault(prune(recipe, paths), prune(RECIPE_DEFAULTS, paths))
+}
+
+/** A LUT the shader can draw: either one that does nothing, or one whose data
+ *  the renderer actually has. */
+function lutIsDrawable(lut: any, ctx: SupportContext): boolean {
+  if (typeof lut !== 'object' || lut === null) return false
+  if (lut.stage !== undefined && lut.stage !== 'pre' && lut.stage !== 'post') return false
+  // A missing name or zero strength is `apply_lut`'s own no-op, whatever the
+  // other fields say.
+  if (!lut.name || lut.strength === 0) return true
+  return typeof lut.name === 'string' && ctx.hasLut?.(lut.name) === true
 }

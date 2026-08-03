@@ -80,6 +80,36 @@ means Node is below the Vite floor (`node -v`), and a `uv sync` that resolves
 oddly usually means an old uv (`uv self update`). The frontend must be built at
 least once — without `frontend/dist` the backend serves the API but no UI.
 
+## Run it as a PWA (no backend)
+
+The frontend is also a standalone progressive web app: it reads your photo
+folder straight off disk with the File System Access API, decodes RAW with
+LibRaw compiled to WebAssembly, and develops on the GPU. **Nothing is uploaded
+— there is no server to upload to.** Sidecars and thumbnails are written back
+into your own folder and its browser-local cache.
+
+- **Chrome or Edge, on desktop.** Safari, Firefox and every browser on iOS lack
+  the File System Access API; the app says so up front rather than failing
+  halfway in.
+- **Install it** from the address-bar install icon to get a standalone window.
+- **Offline.** A service worker precaches the app shell, and the LibRaw wasm is
+  cached the first time a RAW is decoded, so a second visit works with no
+  network at all.
+- **Updates** ship by pushing to `main`: GitHub Actions rebuilds and deploys the
+  static site, and open tabs get a *"a new version of Viberoom is ready"*
+  prompt instead of silently running last month's build.
+
+The Python package stays an optional companion. Install it when you want the
+things a browser cannot do on its own: the Claude Code sidebar, the MCP server,
+the REST API, and the benchmark suite.
+
+To host it yourself, build with `VITE_BASE` set to the path it will be served
+from (`/` for the FastAPI mount, `/viberoom/` for GitHub Pages):
+
+```bash
+VITE_BASE=/viberoom/ npm --prefix frontend run build
+```
+
 ## Let an agent drive
 
 ```bash

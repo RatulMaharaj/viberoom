@@ -5,17 +5,20 @@ import { cameraLine, exifLine } from '../exif'
 const Thumb = memo(function Thumb({
   image,
   current,
+  src,
   onPick,
   onHover,
 }: {
   image: ImageMeta
   current: boolean
+  /** Set only in the no-server build; see ImageCard's `thumbSrc`. */
+  src?: string
   onPick: (id: string) => void
   onHover: (im: ImageMeta | null) => void
 }) {
   return (
     <img
-      src={api.thumbnailUrl(image.id)}
+      src={src ?? api.thumbnailUrl(image.id)}
       alt={image.filename}
       loading="lazy"
       onClick={() => onPick(image.id)}
@@ -35,12 +38,15 @@ export function Filmstrip({
   image,
   id,
   idx,
+  thumbSrcs,
   onPick,
 }: {
   siblings: ImageMeta[]
   image: ImageMeta | null
   id: string | undefined
   idx: number
+  /** id -> tile URL, in the no-server build only. */
+  thumbSrcs?: Record<string, string>
   onPick: (id: string) => void
 }) {
   const [hovered, setHovered] = useState<ImageMeta | null>(null)
@@ -53,11 +59,12 @@ export function Filmstrip({
           key={im.id}
           image={im}
           current={im.id === id}
+          src={thumbSrcs?.[im.id]}
           onPick={onPick}
           onHover={setHovered}
         />
       )),
-    [siblings, id, onPick],
+    [siblings, id, onPick, thumbSrcs],
   )
 
   const position = (hovered ? siblings.findIndex((s) => s.id === hovered.id) : idx) + 1

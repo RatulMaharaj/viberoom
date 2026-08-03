@@ -10,6 +10,7 @@ export const ImageCard = memo(function ImageCard({
   image,
   selected,
   multi,
+  thumbSrc,
   onClick,
   onOpen,
   onRate,
@@ -18,6 +19,9 @@ export const ImageCard = memo(function ImageCard({
   image: ImageMeta
   selected: boolean
   multi: boolean
+  /** Ready-made tile URL. Set only in the no-server build, where a thumbnail
+   *  is a blob the page decoded itself rather than something to GET. */
+  thumbSrc?: string
   onClick: (id: string, e: MouseEvent) => void
   onOpen: (id: string) => void
   onRate: (id: string, rating: number) => void
@@ -34,7 +38,7 @@ export const ImageCard = memo(function ImageCard({
     >
       <figure className="aspect-[3/2] bg-base-300 relative group">
         <img
-          src={api.thumbnailUrl(image.id)}
+          src={thumbSrc ?? api.thumbnailUrl(image.id)}
           alt={image.filename}
           loading="lazy"
           className="object-cover w-full h-full"

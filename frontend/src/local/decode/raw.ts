@@ -34,6 +34,9 @@ export interface RawDecoder {
   open(bytes: BufferSource, settings?: LibRawSettings): Promise<void>
   imageData(): Promise<{ width: number; height: number; colors: number; bits: number; data: ArrayBufferView } | undefined>
   metadata(full?: boolean): Promise<Record<string, unknown> | undefined>
+  /** Optional so a stub decoder does not have to implement it; the caller
+   *  treats "absent" the same as "this file has no usable thumbnail". */
+  thumbnailData?(): Promise<{ data: Uint8Array; width: number; height: number; format: string } | undefined>
   dispose(): void
 }
 
@@ -100,6 +103,46 @@ export async function readRawMetadata(bytes: ArrayBuffer): Promise<Record<string
     return await decoder.metadata(true)
   } catch {
     return undefined
+  } finally {
+    decoder.dispose()
+  }
+}
+
+/** The JPEG a camera embedded in its own RAW, plus the orientation LibRaw
+ *  would have applied to the full decode. */
+export interface RawThumbnail {
+  blob: Blob
+  /** `imgdata.sizes.flip`, in EXIF's numbering. The embedded JPEG is stored
+   *  unrotated and usually carries no EXIF of its own, so the caller has to
+   *  apply this itself or portrait shots come out on their side. */
+  flip: number
+}
+
+/**
+ * The embedded preview JPEG, or null if there is not a usable one.
+ *
+ * This is the difference between a grid that draws and a grid that does not: a
+ * full RAW decode is 0.6-9 seconds, and every modern camera already stores a
+ * finished JPEG of the same frame inside the file. Reading it costs an
+ * `open()` — container parsing only, tens of milliseconds — plus a memcpy.
+ *
+ * Only the `jpeg` form is taken. The `bitmap` one is rare, uncompressed, and
+ * needs its own channel-order handling; returning null there sends the caller
+ * down the slow-but-correct path instead of down a guess.
+ */
+export async function rawThumbnail(bytes: ArrayBuffer): Promise<RawThumbnail | null> {
+  const decoder = makeDecoder()
+  try {
+    await decoder.open(new Uint8Array(bytes.slice(0)), SETTINGS)
+    const thumb = await decoder.thumbnailData?.()
+    if (!thumb || thumb.format !== 'jpeg' || !thumb.data?.byteLength) return null
+    const meta = await decoder.metadata().catch(() => undefined)
+    return {
+      blob: new Blob([thumb.data as unknown as BlobPart], { type: 'image/jpeg' }),
+      flip: Number(meta?.flip ?? 0) || 0,
+    }
+  } catch {
+    return null
   } finally {
     decoder.dispose()
   }

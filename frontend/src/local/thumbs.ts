@@ -5,8 +5,10 @@
  *  the difference between a few MB and a few hundred MB of bitmaps across a
  *  grid of a thousand photos.
  *
- *  RAW is not our problem here: another agent owns `local/decode/`. This file
- *  only defines the hook and a placeholder so the grid renders meanwhile.
+ *  RAW arrives through the hook below rather than by importing `local/decode/`
+ *  directly, which keeps this module free of the wasm decoder and of any
+ *  opinion about how a RAW gets to be a bitmap. `local/index.ts` registers the
+ *  real one.
  */
 
 const BROWSER_DECODABLE = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'])
@@ -40,15 +42,21 @@ export async function decodeToBitmap(
   throw new Error(`No decoder for ${ext}`)
 }
 
-/** Object-URL for a decoded bitmap. Caller revokes. */
-export async function bitmapToUrl(bitmap: ImageBitmap, quality = 0.85): Promise<string> {
+/** JPEG bytes for a decoded bitmap, which is what actually gets cached: a
+ *  thumbnail blob is tens of kilobytes where the bitmap it came from is
+ *  megabytes of RGBA. Closes the bitmap. */
+export async function bitmapToBlob(bitmap: ImageBitmap, quality = 0.85): Promise<Blob> {
   const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('No 2D context')
   ctx.drawImage(bitmap, 0, 0)
   bitmap.close()
-  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality })
-  return URL.createObjectURL(blob)
+  return canvas.convertToBlob({ type: 'image/jpeg', quality })
+}
+
+/** Object-URL for a decoded bitmap. Caller revokes. */
+export async function bitmapToUrl(bitmap: ImageBitmap, quality = 0.85): Promise<string> {
+  return URL.createObjectURL(await bitmapToBlob(bitmap, quality))
 }
 
 /** A neutral tile for anything we cannot decode yet, so an undecodable RAW
