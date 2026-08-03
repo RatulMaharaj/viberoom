@@ -220,7 +220,12 @@ export function Library() {
           </>
           )}
           {error && <div className="alert alert-error text-sm">{error}</div>}
-          {showPicker && (
+          {/* Server-mode only. It browses the *server's* disk over the API, so
+              with no backend it has nothing to list — and asking anyway is how
+              a static host's "here's the app shell" reply for /api/v1/fs ends
+              up parsed as JSON. The browser's own picker is what local mode
+              uses, and it is the same native dialog. */}
+          {showPicker && !local && (
             <FolderPicker
               onSelect={openLibrary}
               onClose={() => setShowPicker(false)}

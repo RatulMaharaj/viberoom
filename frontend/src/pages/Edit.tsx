@@ -15,6 +15,7 @@ import { ModuleTabs } from '../components/ModuleTabs'
 import { ZoomableImage } from '../components/ZoomableImage'
 import { createLiveRecipe } from '../gpu'
 import { useGpuPreview } from '../hooks/useGpuPreview'
+import { useLocalGpuPreview } from '../hooks/useLocalGpuPreview'
 import { loadFilters } from '../filters'
 import { onSidecarChange } from '../events'
 import { loadLastImage, saveLastImage } from '../selection'
@@ -65,6 +66,23 @@ export function Edit() {
     enabled: !local && !proof && !showBefore && !cropMode && !zoomed,
     commitTick,
   })
+
+  /** The same GPU chain, driven from the file instead of `/source`, and with
+   *  none of the server/GPU arbitration above — locally the GPU frame is the
+   *  only frame there has ever been. It draws while the sliders move; the
+   *  still frame from `local/preview.ts` takes over once an edit settles, and
+   *  is all there is for a recipe the shader cannot reproduce. */
+  const localGpu = useLocalGpuPreview({
+    imageId: id,
+    size: GPU_PREVIEW_SIZE,
+    live,
+    // Zoomed is excluded for the same reason the size is fixed: the still
+    // frame is re-rendered at 4096 there, and overlaying a 2048 canvas on it
+    // would quietly drop the resolution the photographer zoomed in to judge.
+    enabled: local && !showBefore && !cropMode && !zoomed,
+  })
+
+  const gpuMode = local ? localGpu.mode : gpu.mode
 
   const refreshAll = useCallback(() => {
     setBust(String(Date.now()))
@@ -254,14 +272,28 @@ export function Edit() {
             alt={image?.filename ?? ''}
             // The GPU frame is the real chain, not an approximation, so the
             // CSS delta must not be layered on top of it as well.
-            filter={gpu.mode === 'gpu' ? '' : liveFilter}
-            hideImage={gpu.mode === 'gpu'}
+            // ...and locally, neither is the CSS delta honest when the frame
+            // underneath is the untouched original rather than the last render.
+            filter={
+              gpuMode === 'gpu' || (local && localFrame?.rendered === 'original') ? '' : liveFilter
+            }
+            hideImage={gpuMode === 'gpu'}
+            // Two canvases rather than one shared ref: only ever one of the
+            // hooks is active, but a WebGL context cannot be handed from one
+            // to the other on the same element.
             overlay={(transform) => (
-              <GpuPreview
-                canvasRef={gpu.canvasRef}
-                style={transform}
-                visible={gpu.mode === 'gpu'}
-              />
+              <>
+                <GpuPreview
+                  canvasRef={gpu.canvasRef}
+                  style={transform}
+                  visible={!local && gpu.mode === 'gpu'}
+                />
+                <GpuPreview
+                  canvasRef={localGpu.canvasRef}
+                  style={transform}
+                  visible={local && localGpu.mode === 'gpu'}
+                />
+              </>
             )}
             onZoomChange={setZoomed}
             onLoaded={() => setRenderTick((t) => t + 1)}
@@ -279,7 +311,7 @@ export function Edit() {
         )}
         {/* The one case where local and server disagree about what is on
             screen, so it is said out loud rather than shown quietly. */}
-        {local && !showBefore && localFrame?.rendered === 'original' && image?.has_edits && (
+        {local && !showBefore && gpuMode !== 'gpu' && localFrame?.rendered === 'original' && image?.has_edits && (
           <span className="absolute top-3 right-3 badge badge-warning gap-1 font-mono">
             Original — these edits need the desktop app
           </span>
@@ -303,24 +335,17 @@ export function Edit() {
           </div>
         )}
       </div>
-      {/* The develop panel talks to the REST API directly — presets, LUTs,
-          auto-adjust, soft proof, history. None of that has a browser
-          implementation yet, and a panel whose every control 404s is worse
-          than an honest gap. Ratings, flags and the rendered preview all work
-          without it. */}
-      {!fullscreen && id && local && (
-        <div className="w-72 shrink-0 p-4 text-sm opacity-70 border-l border-base-300/30">
-          <p className="font-medium mb-2">Read-only, for now</p>
-          <p>
-            Running with no server: browsing, ratings, flags and previews of
-            existing edits work. Changing a recipe still needs the desktop app.
-          </p>
-        </div>
-      )}
-      {!fullscreen && id && !local && (
+      {/* The sliders write the recipe, which both sources can do — the server
+          over REST, the browser into the sidecar. The tools inside the panel
+          that are genuinely server-side compute disable themselves. */}
+      {!fullscreen && id && (
         <EditPanel
           imageId={id}
-          previewSrc={api.previewUrl(id, 1024, bust)}
+          local={local}
+          // The histogram reads whatever frame is on screen. With no server
+          // there is no `/preview` to point it at, so it gets the same blob
+          // the loupe is showing.
+          previewSrc={local ? (localFrame?.url ?? '') : api.previewUrl(id, 1024, bust)}
           isRaw={image?.is_raw ?? false}
           hasEdits={image?.has_edits ?? false}
           version={panelVersion}

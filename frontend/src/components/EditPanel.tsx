@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronRight, FileImage, Pencil, RotateCcw, Wand2 } from 'lucide-react'
 import { api } from '../api'
+import { getSource } from '../source'
 import { HSL_CHANNEL_ORDER, HSL_HUE_RANGE, HUE_CENTERS, publish, setAt, type LiveRecipe } from '../gpu'
 import { pushAction } from '../undo'
 import { DevelopExtras, useDebouncedCommit } from './DevelopExtras'
@@ -220,6 +221,20 @@ function liveDeltaFilter(cur: any, base: any): string {
   return parts.join(' ')
 }
 
+/** The four recipe operations, routed through whichever source is in play.
+ *
+ *  In server mode these land on exactly the `api.*` calls this panel used to
+ *  make; with no server they read and write the `.vibe.json` sidecar in the
+ *  folder the user opened. `getSource()` resolves once per page load, so the
+ *  extra `await` costs nothing after the first call.
+ */
+const recipeOps = {
+  get: (id: string) => getSource().then((s) => s.getRecipe(id)),
+  put: (id: string, recipe: object) => getSource().then((s) => s.putRecipe(id, recipe)),
+  patch: (id: string, patch: object) => getSource().then((s) => s.patchRecipe(id, patch)),
+  reset: (id: string) => getSource().then((s) => s.resetRecipe(id)),
+}
+
 export function EditPanel({
   onProof,
   imageId,
@@ -232,6 +247,7 @@ export function EditPanel({
   onLiveFilter,
   live,
   onCommitted,
+  local = false,
 }: {
   imageId: string
   previewSrc: string
@@ -250,6 +266,9 @@ export function EditPanel({
   /** fires once an edit has actually been persisted */
   onCommitted?: () => void
   onProof: (space: string | null) => void
+  /** Running with no server. The sliders work either way — they go to the
+   *  sidecar — but everything that is server-side compute is turned off. */
+  local?: boolean
 }) {
   const [folded, setFolded] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(GROUPS.filter((g) => g.collapsed).map((g) => [g.title, true])),
@@ -276,7 +295,7 @@ export function EditPanel({
   }
 
   useEffect(() => {
-    api.getRecipe(imageId).then((r) => {
+    recipeOps.get(imageId).then((r) => {
       setRecipe(r)
       lastSaved.current = r
       displayed.current = r
@@ -296,8 +315,10 @@ export function EditPanel({
 
   const record = (id: string, prev: Record<string, any>, next: Record<string, any>) =>
     pushAction({
-      undo: () => api.putRecipe(id, prev),
-      redo: () => api.putRecipe(id, next),
+      // Both replay through the source, so an undo with no server rewrites the
+      // sidecar exactly as the original edit wrote it.
+      undo: () => recipeOps.put(id, prev),
+      redo: () => recipeOps.put(id, next),
     })
 
   // Persistence only. While dragging, the preview comes from the GPU (or the
@@ -307,7 +328,7 @@ export function EditPanel({
     debounced(
       async () => {
         const prev = lastSaved.current
-        const updated = await api.patchRecipe(imageId, patch)
+        const updated = await recipeOps.patch(imageId, patch)
         if (prev) record(imageId, prev, updated)
         lastSaved.current = updated
       },
@@ -330,7 +351,7 @@ export function EditPanel({
 
   const reset = async () => {
     const prev = lastSaved.current
-    const updated = await api.resetRecipe(imageId)
+    const updated = await recipeOps.reset(imageId)
     if (prev) record(imageId, prev, updated)
     lastSaved.current = updated
     setRecipe(updated)
@@ -370,7 +391,19 @@ export function EditPanel({
       <div className="flex items-center justify-between px-4 pt-3">
         <h2 className="font-bold text-sm">Develop</h2>
         <div className="flex gap-1">
-          <button className="btn btn-xs btn-ghost" title="Computational auto-adjust" onClick={auto}>
+          {/* Auto-adjust reads the image histogram in Python and hands back a
+              whole recipe; there is no browser implementation of it, so with
+              no server it is disabled rather than silently doing nothing. */}
+          <button
+            className="btn btn-xs btn-ghost"
+            title={
+              local
+                ? 'Auto-adjust analyses the image on the server — needs the desktop app'
+                : 'Computational auto-adjust'
+            }
+            onClick={auto}
+            disabled={local}
+          >
             <Wand2 size={12} /> Auto
           </button>
           <button className="btn btn-xs btn-ghost" title="Reset all edits" onClick={reset}>
@@ -496,15 +529,27 @@ export function EditPanel({
         )
       })}
 
-      <DevelopExtras
-        imageId={imageId}
-        recipe={recipe}
-        onChanged={() => {
-          onRecipeChange()
-          setVersionTick((v) => v + 1)
-        }}
-        onProof={onProof}
-      />
+      {/* Every tool in here is an API call with no browser equivalent yet —
+          history and snapshots, virtual copies, masks, LUTs and presets, IPTC,
+          ML enhance, soft proof. A panel whose every control 404s is worse
+          than an honest gap, so with no server it is replaced by a note. */}
+      {local ? (
+        <p className="px-4 py-3 text-xs opacity-60 border-t border-base-300/30">
+          History, snapshots, masks, LUTs, presets, metadata and soft proof all
+          run on the server — they need the desktop app. The sliders above are
+          saved to the sidecar and will be there when you open it.
+        </p>
+      ) : (
+        <DevelopExtras
+          imageId={imageId}
+          recipe={recipe}
+          onChanged={() => {
+            onRecipeChange()
+            setVersionTick((v) => v + 1)
+          }}
+          onProof={onProof}
+        />
+      )}
       <p className="px-4 pb-3 text-[10px] opacity-40">
         Edits are non-destructive — stored in the .vibe.json sidecar, shared with agents.
       </p>
