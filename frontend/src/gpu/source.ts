@@ -61,7 +61,17 @@ export async function fetchServerFrame(
   size: number,
   signal?: AbortSignal,
 ): Promise<ServerFrame> {
-  const r = await fetch(`${BASE}/images/${imageId}/preview?size=${size}`, { signal })
+  // `cache: 'no-cache'` revalidates instead of reusing what is stored. The
+  // preview URL does not change when the recipe does — the recipe is not in
+  // it — and the endpoint answers with `Cache-Control: immutable`, which
+  // licenses the browser to serve its copy without ever asking. So an edit
+  // landed on the server and the tab kept showing the render from before it,
+  // until a reload forced the question. The ETag still makes the common case
+  // a 304, so revalidating is cheap; it is being skipped that was the problem.
+  const r = await fetch(`${BASE}/images/${imageId}/preview?size=${size}`, {
+    signal,
+    cache: 'no-cache',
+  })
   if (!r.ok) throw new Error(`preview ${r.status}`)
   const hash = r.headers.get('X-Recipe-Hash') ?? ''
   const url = URL.createObjectURL(await r.blob())

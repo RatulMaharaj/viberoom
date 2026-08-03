@@ -17,15 +17,12 @@ from fastapi import (
     Query,
     Request,
     Response,
-    WebSocket,
-    WebSocketDisconnect,
 )
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-from viberoom import agent
-from viberoom import mcp_server, permission_mcp
+from viberoom import mcp_server
 from viberoom import presets as preset_store
 from viberoom import state
 from viberoom.catalog.scanner import scan
@@ -48,7 +45,6 @@ from viberoom.recipe.sidecar import (
 # (`claude mcp add --transport http viberoom http://127.0.0.1:8423/mcp`)
 # instead of a stdio command with an absolute path to this checkout.
 _mcp_app = mcp_server.mcp.streamable_http_app(streamable_http_path="/mcp")
-_approve_app = permission_mcp.mcp.streamable_http_app(streamable_http_path="/mcp-approve")
 
 
 _mcp_stack: AsyncExitStack | None = None
@@ -79,16 +75,13 @@ async def _lifespan(_: FastAPI):
         # only reconciles what changed while we were away.
         _startup_scan = asyncio.create_task(run_in_threadpool(scan, lib, state.db()))
         _startup_scan.add_done_callback(_log_startup_scan)
-    # The MCP session managers are single-use, but tests enter this lifespan
-    # once per TestClient — so start them at most once and leave them up for
+    # The MCP session manager is single-use, but tests enter this lifespan
+    # once per TestClient — so start it at most once and leave it up for
     # the life of the process.
     if _mcp_stack is None:
         _mcp_stack = AsyncExitStack()
         await _mcp_stack.enter_async_context(
             _mcp_app.router.lifespan_context(_mcp_app)
-        )
-        await _mcp_stack.enter_async_context(
-            _approve_app.router.lifespan_context(_approve_app)
         )
     yield
 
@@ -96,10 +89,9 @@ async def _lifespan(_: FastAPI):
 app = FastAPI(title="viberoom", version="0.1.0", lifespan=_lifespan)
 api = FastAPI(title="viberoom API")
 app.mount("/api/v1", api)
-# Adopt the sub-apps' routes rather than mounting them: a Mount strips its
+# Adopt the sub-app's routes rather than mounting them: a Mount strips its
 # prefix, which would make the URLs /mcp/mcp or force a trailing slash.
 app.router.routes.extend(_mcp_app.routes)
-app.router.routes.extend(_approve_app.routes)
 
 
 # ---------- library ----------
@@ -296,107 +288,6 @@ def get_current() -> dict:
         "image_id": _current_image,
         "image": _row_to_dict(rows[0]) if rows else None,
     }
-
-
-# ---------- embedded Claude Code session ----------
-
-def _agent_session():
-    """The session for the open library, spawning `claude` lazily."""
-    lib = state.require_library()
-    port = os.environ.get("VIBEROOM_PORT", "8423")
-    return agent.session(lib.root, f"http://127.0.0.1:{port}")
-
-
-@api.get("/agent/status")
-def agent_status() -> dict:
-    """Whether a local `claude` install was found, and whether a session is up."""
-    info = agent.detect()
-    sess = agent.current()
-    lib = state.library_or_none()
-    return {
-        **info,
-        "running": bool(sess and sess.running),
-        "session_id": sess.session_id if sess else None,
-        "cwd": str(lib.root) if lib else None,
-        "config": dict(sess.config) if sess else dict(agent.DEFAULT_CONFIG),
-        "options": {
-            "model": agent.MODELS,
-            "effort": agent.EFFORTS,
-            "permission_mode": agent.PERMISSION_MODES,
-        },
-    }
-
-
-class PermissionRequestIn(BaseModel):
-    tool_name: str
-    input: dict = Field(default_factory=dict)
-    tool_use_id: str = ""
-
-
-@api.post("/agent/permission/request")
-async def agent_permission_request(body: PermissionRequestIn) -> dict:
-    """Called by the permission MCP server; blocks until the user decides."""
-    sess = agent.current()
-    if sess is None:
-        return {"behavior": "deny", "message": "No agent session is open."}
-    return await agent.broker.ask(sess, body.tool_name, body.input)
-
-
-@api.websocket("/agent/ws")
-async def agent_ws(ws: WebSocket) -> None:
-    """Bidirectional bridge between the sidebar and the `claude` subprocess."""
-    await ws.accept()
-    try:
-        sess = _agent_session()
-    except HTTPException as e:
-        await ws.send_json({"type": "error", "message": e.detail})
-        await ws.close()
-        return
-
-    queue = sess.subscribe()
-    for frame in sess.replay():
-        await ws.send_json(frame)
-    await ws.send_json({"type": "status", "running": sess.running, "cwd": str(sess.cwd)})
-
-    async def push() -> None:
-        while True:
-            await ws.send_json(await queue.get())
-
-    pusher = asyncio.create_task(push())
-    try:
-        while True:
-            msg = await ws.receive_json()
-            kind = msg.get("type")
-            if kind == "user":
-                text = (msg.get("text") or "").strip()
-                if text:
-                    await sess.send(_with_context(text, msg.get("image_id")), echo=text)
-            elif kind == "permission":
-                agent.broker.resolve(msg.get("id", ""), bool(msg.get("allow")))
-            elif kind == "config":
-                await sess.configure(msg.get("config") or {})
-            elif kind == "reset":
-                await sess.stop()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        pusher.cancel()
-        sess.unsubscribe(queue)
-
-
-def _with_context(text: str, image_id: str | None) -> str:
-    """Tell the agent which photo the user is looking at, so \"this one\" works."""
-    iid = image_id or _current_image
-    if iid is None:
-        return text
-    rows = state.db().query("SELECT rel_path FROM images WHERE id=?", (iid,))
-    if not rows:
-        return text
-    return (
-        f"<viberoom-context>Currently open image: {rows[0]['rel_path']} "
-        f"(id {iid}). Use the viberoom MCP tools to inspect or edit it."
-        "</viberoom-context>\n\n" + text
-    )
 
 
 # ---------- change events: push sidecar edits to the UI live ----------
@@ -1301,11 +1192,19 @@ def _recipe_for_variant(sc: Sidecar, variant: str | None) -> Recipe:
 
 # ---------- previews ----------
 
-#: Rendered imagery is addressed by a key that already covers the file mtime,
-#: the recipe and the pipeline version, so a given URL+ETag pair can never
-#: describe different pixels. That makes the response genuinely immutable and
-#: lets the browser skip revalidation entirely for a year.
-_IMMUTABLE = "private, max-age=31536000, immutable"
+#: Revalidate every time, and let the ETag make that cheap.
+#:
+#: This said `immutable` for a while, reasoning that the cache key covers the
+#: mtime, the recipe and the pipeline version. It does — but the key is in the
+#: *ETag*, not the URL, and `/preview?size=2048` is the same URL before and
+#: after an edit. `immutable` licenses a browser to serve its stored copy
+#: without asking, so an edit would land on disk and the tab would keep showing
+#: the render from before it until someone forced a reload.
+#:
+#: `immutable` is only ever truthful for a URL that names its own content.
+#: These do not, so they revalidate — which the ETag answers with a bodyless
+#: 304, keeping the bandwidth saving that mattered without the staleness.
+_REVALIDATE = "private, max-age=0, must-revalidate"
 
 
 def _etag_response(
@@ -1318,7 +1217,7 @@ def _etag_response(
     reuse what it already had.
     """
     etag = f'"{hashlib.sha1(etag_key.encode()).hexdigest()}"'
-    common = {"ETag": etag, "Cache-Control": _IMMUTABLE, **headers}
+    common = {"ETag": etag, "Cache-Control": _REVALIDATE, **headers}
 
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=common)

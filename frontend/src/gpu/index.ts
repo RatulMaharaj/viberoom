@@ -10,8 +10,22 @@ export { BAND_WIDTH, HSL_CHANNEL_ORDER, HSL_HUE_RANGE, HUE_CENTERS, LUMA_WEIGHTS
 export type { HslChannelName } from './constants'
 export { createLiveRecipe, publish, setAt } from './live'
 export type { LiveRecipe } from './live'
+export { LutError, parseCube } from './lut'
+export type { LutData } from './lut'
 export { GpuRenderer, GpuUnavailable } from './renderer'
 export { fetchServerFrame, fetchSource } from './source'
 export type { ServerFrame, SourceFrame, SourceFormat } from './source'
-export { gpuSupportsRecipe } from './support'
+export { gpuSupportGaps, gpuSupportsRecipe } from './support'
+export type { SupportContext } from './support'
 export { buildUniforms } from './uniforms'
+export type {
+  DetailUniforms,
+  FrameInfo,
+  GaussPass,
+  GeomPass,
+  GeometryUniforms,
+  LensUniforms,
+  LutUniforms,
+  PresencePass,
+  Uniforms,
+} from './uniforms'

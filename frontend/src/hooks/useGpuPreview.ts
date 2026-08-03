@@ -100,7 +100,7 @@ export function useGpuPreview({ imageId, size, live, enabled, commitTick }: Opti
     const seq = ++issued.current
     const asked = live.current
     fetchServerFrame(imageId, size, ctrl.signal)
-      .then((frame) => {
+      .then(async (frame) => {
         // Out-of-order arrival is normal — a 4096 px render started earlier can
         // land after a later one. The hash settles it without a stale swap:
         // an older response whose pixels are already on screen is a no-op,
@@ -109,11 +109,34 @@ export function useGpuPreview({ imageId, size, live, enabled, commitTick }: Opti
           frame.revoke()
           return
         }
+
+        // Decode before swapping, or every commit flashes. Handing the <img> a
+        // new src only *starts* a decode: the canvas would be hidden and the
+        // image shown while it still had nothing to paint, so one frame of
+        // blank landed between the two renders. Worse, revoking the previous
+        // blob URL pulled the pixels out from under the image still using it.
+        // Decoding first makes the swap a straight cut.
+        try {
+          const img = new Image()
+          img.src = frame.url
+          await img.decode()
+        } catch {
+          // A decode failure is not a reason to drop the frame — the <img> may
+          // still render it, and the GPU frame stays up if it does not.
+        }
+        if (ctrl.signal.aborted) {
+          frame.revoke()
+          return
+        }
+
         applied.current = seq
         shownHash.current = frame.hash
         shownRecipe.current = asked
         setServerFrame((prev) => {
-          prev?.revoke()
+          // Revoke a frame later: the <img> has swapped to the new URL by the
+          // time this runs, but the browser may still be reading the old one
+          // to paint the frame that is on screen right now.
+          if (prev) setTimeout(() => prev.revoke(), 1000)
           return frame
         })
       })
@@ -125,6 +148,10 @@ export function useGpuPreview({ imageId, size, live, enabled, commitTick }: Opti
   // release the last blob URL on unmount
   useEffect(() => () => serverFrame?.revoke(), [serverFrame])
 
+  // Opt-in tracing for the preview swap; see the transition log below.
+  const debugPreview = typeof window !== 'undefined'
+    && new URLSearchParams(window.location.search).has('debug')
+
   // ---- the render loop ----
   useEffect(() => {
     if (!active || !ready) {
@@ -134,10 +161,52 @@ export function useGpuPreview({ imageId, size, live, enabled, commitTick }: Opti
     let raf = 0
     let drawnVersion = -1
     let current: PreviewMode = 'off'
+    let redrawOnShow = false
+
+    /** Does this recipe describe the same edit as the one already on screen?
+     *
+     *  Identity alone is not enough. The develop panel refetches the recipe
+     *  after every commit and republishes it — same values, new object — which
+     *  read as a fresh edit and bounced the preview back to the GPU it had
+     *  just handed off from, about 130ms later. That was the flash.
+     *
+     *  Comparing by value is the fix, but it must not run per frame: during a
+     *  drag the recipe genuinely changes and this would serialize it 60 times
+     *  a second. `live.version` only moves on a real publish, so the answer is
+     *  cached against it and each published recipe is serialized at most once.
+     */
+    //  Keyed on the shown frame too, not just the version: a server render
+    //  landing changes what is on screen without the recipe moving at all.
+    let checkedKey = ''
+    let checkedResult = false
+    const sameAsShown = (recipe: unknown): boolean => {
+      const key = `${live.version}:${shownHash.current}`
+      if (key === checkedKey) return checkedResult
+      checkedKey = key
+      checkedResult =
+        shownRecipe.current != null &&
+        JSON.stringify(shownRecipe.current) === JSON.stringify(recipe)
+      return checkedResult
+    }
     const to = (next: PreviewMode) => {
       // setState only on a real transition: this runs 60 times a second and a
       // redundant update would re-render the whole develop panel each frame.
       if (next !== current) {
+        // Coming back from hidden: draw again on the following frame, once the
+        // canvas is really in the layout. Belt and braces alongside
+        // preserveDrawingBuffer — between them the canvas is never composited
+        // empty, which is what made every edit flash.
+        if (next === 'gpu') redrawOnShow = true
+        // `?debug=1` traces the swaps. A flash lasts a frame or two, which is
+        // far too quick to attribute by eye, and the mode it passes through
+        // says which of several very different bugs it actually is.
+        if (debugPreview) {
+          console.log(`[preview] ${current} -> ${next}`, {
+            t: Math.round(performance.now()),
+            ready,
+            hasServerFrame: Boolean(serverFrame),
+          })
+        }
         current = next
         setMode(next)
       }
@@ -151,12 +220,16 @@ export function useGpuPreview({ imageId, size, live, enabled, commitTick }: Opti
         to('off')
         return
       }
-      if (shownRecipe.current === recipe) {
+      if (shownRecipe.current === recipe || sameAsShown(recipe)) {
         to('server')
         return
       }
       to('gpu')
-      if (live.version !== drawnVersion) {
+      if (live.version !== drawnVersion || redrawOnShow) {
+        // `redrawOnShow` survives one extra frame on purpose: the draw that
+        // accompanies the mode change happens before React has put the canvas
+        // back in the layout, so it is the frame *after* that has to land.
+        redrawOnShow = current !== 'gpu'
         drawnVersion = live.version
         renderer.render(recipe)
       }

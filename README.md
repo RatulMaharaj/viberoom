@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="desktop/icons-src/icon.png" width="96" alt="Viberoom" />
+  <img src="frontend/public/icon-source.png" width="96" alt="Viberoom" />
 </p>
 
 <h1 align="center">Viberoom</h1>
@@ -7,10 +7,9 @@
 <p align="center"><em>All the sliders — and an agent that can drive them.</em></p>
 
 Viberoom is a RAW photo manager and non-destructive editor you can drive
-**by hand or by agent**. Edit with the full develop UI in the browser (or
-desktop app) — or tell Claude Code *"reject the blurry ones, warm up the
-sunsets, export the picks"* and it happens through MCP, REST, or plain JSON
-sidecar files.
+**by hand or by agent**. Edit with the full develop UI in the browser — or tell
+Claude Code *"reject the blurry ones, warm up the sunsets, export the picks"*
+and it happens through MCP, REST, or plain JSON sidecar files.
 
 - 🧾 **Non-destructive, always.** Every edit is a readable `photo.CR3.vibe.json`
   next to the original. Delete the sidecar, get your pixels back.
@@ -21,9 +20,10 @@ sidecar files.
   heal/clone, grain — and local masks: gradients, luminance/color ranges,
   brushes, AI subject/sky masks. Everything the API can do is reachable from
   the interface, and vice versa.
-- 🤖 **Claude Code in the sidebar.** If a local `claude` install is detected,
-  the robot icon opens a real Claude Code session wired to this library —
-  model/effort/permission picker, approve-deny prompts and all.
+- 🤖 **Bring your own agent.** The app is a PWA that exposes its tools to
+  whatever agent your browser provides, via WebMCP — it no longer launches an
+  agent of its own. Outside the browser, `viberoom-mcp` drives it from Claude
+  Code.
 - 🗂️ **DAM things.** Ratings, flags, labels, keywords, collections (smart too),
   stacks, dupes, history, snapshots, virtual copies, multi-folder catalogs.
 - 📥 **In and out.** Card ingest, tethered capture, HDR & pano merge, ML
@@ -37,7 +37,6 @@ sidecar files.
 | **Python** | 3.12+ | `pyproject.toml` floor; 3.13 is fine |
 | **Node** | 20.19+ or 22.12+ | what Vite 8 requires |
 | **[uv](https://docs.astral.sh/uv/)** | any recent | resolves and runs the backend |
-| **Rust** | stable, via `rustup` | *desktop app only* — skip for web |
 
 Nothing else. LibRaw and the image codecs arrive inside the `rawpy` and Pillow
 wheels, so there's no Homebrew/apt step and no compiler needed for the web app.
@@ -67,18 +66,42 @@ Other ways to run:
 
 ```bash
 uv run dev             # hacking: backend --reload + Vite (:7666 "ROOM" → :8423 "VIBE")
-uv run dev-desktop     # the desktop app, dev mode
-uv run build-desktop   # installers: .dmg / .msi / .AppImage — see desktop/README.md
 ```
-
-The desktop build additionally needs Rust, and on Linux
-`libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf` —
-see [desktop/README.md](desktop/README.md).
 
 If something's off: `npm run build` failing on syntax that looks fine usually
 means Node is below the Vite floor (`node -v`), and a `uv sync` that resolves
 oddly usually means an old uv (`uv self update`). The frontend must be built at
 least once — without `frontend/dist` the backend serves the API but no UI.
+
+## Run it as a PWA (no backend)
+
+The frontend is also a standalone progressive web app: it reads your photo
+folder straight off disk with the File System Access API, decodes RAW with
+LibRaw compiled to WebAssembly, and develops on the GPU. **Nothing is uploaded
+— there is no server to upload to.** Sidecars and thumbnails are written back
+into your own folder and its browser-local cache.
+
+- **Chrome or Edge, on desktop.** Safari, Firefox and every browser on iOS lack
+  the File System Access API; the app says so up front rather than failing
+  halfway in.
+- **Install it** from the address-bar install icon to get a standalone window.
+- **Offline.** A service worker precaches the app shell, and the LibRaw wasm is
+  cached the first time a RAW is decoded, so a second visit works with no
+  network at all.
+- **Updates** ship by pushing to `main`: GitHub Actions rebuilds and deploys the
+  static site, and open tabs get a *"a new version of Viberoom is ready"*
+  prompt instead of silently running last month's build.
+
+The Python package stays an optional companion. Install it when you want the
+things a browser cannot do on its own: the Claude Code sidebar, the MCP server,
+the REST API, and the benchmark suite.
+
+To host it yourself, build with `VITE_BASE` set to the path it will be served
+from (`/` for the FastAPI mount, `/viberoom/` for GitHub Pages):
+
+```bash
+VITE_BASE=/viberoom/ npm --prefix frontend run build
+```
 
 ## Let an agent drive
 

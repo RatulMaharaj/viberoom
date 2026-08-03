@@ -2,31 +2,24 @@ import { useEffect, useState } from 'react'
 import { Download, FolderOpen, Save, Trash2 } from 'lucide-react'
 import { api } from '../api'
 import { useFolderChooser } from '../folderChooser'
+import { getSource, type ExportProgress, type ExportReport, type ExportSettings, type PhotoSource } from '../source'
 import { FolderPicker } from './FolderPicker'
 
 /** Full export panel: format, quality, bit depth, resize, colour space,
  *  output sharpening, watermark, variant and filename template — plus export
- *  presets. Drives /images/{id}/export for one image and /batch/export for
- *  several, so the same form serves both. */
+ *  presets. One form, two back ends: with a server it drives
+ *  /images/{id}/export and /batch/export, and with none it drives the
+ *  browser's own exporter (full-res GPU render, encode, File System Access).
+ *
+ *  The browser cannot do all of it. 16-bit PNG, TIFF, ICC profiles and
+ *  wide-gamut spaces, watermarks, output sharpening, variants and export
+ *  presets are server-side, and in local mode each control is disabled with
+ *  the reason on it — the same treatment Crop and Auto already get. Disabled
+ *  and explained beats enabled and quietly ignored, because the thing at the
+ *  end of this dialog is a file someone keeps.
+ */
 
-export interface ExportSettings {
-  format: 'jpeg' | 'png' | 'tiff'
-  quality: number
-  bit_depth: 8 | 16
-  max_dimension: number | null
-  color_space: 'srgb' | 'display-p3' | 'adobe-rgb' | 'prophoto'
-  output_sharpen: 'screen' | 'matte' | 'glossy' | null
-  variant: string | null
-  dest_dir: string | null
-  filename: string | null
-  watermark: {
-    text: string | null
-    image: string | null
-    position: string
-    opacity: number
-    scale: number
-  } | null
-}
+export type { ExportSettings } from '../source'
 
 const DEFAULTS: ExportSettings = {
   format: 'jpeg',
@@ -57,6 +50,18 @@ const POSITIONS = [
   'bottom-center',
 ]
 
+/** Why a control is off in local mode. Spelled out per control so the tooltip
+ *  says what is missing, not just that something is. */
+const NO_SERVER = {
+  tiff: 'TIFF has no browser encoder — needs the desktop app',
+  depth: '16-bit PNG has no browser encoder — needs the desktop app',
+  space: 'Colour profiles are embedded by the desktop app; the browser writes sRGB',
+  sharpen: 'Output sharpening runs on the server — needs the desktop app',
+  watermark: 'Watermarks are composited on the server — needs the desktop app',
+  variant: 'Variants live in the server catalog — needs the desktop app',
+  preset: 'Export presets are stored by the desktop app',
+}
+
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="flex items-center gap-2">
@@ -70,77 +75,79 @@ export function ExportDialog({
   imageIds,
   onClose,
 }: {
-  /** one id exports directly; several go through /batch/export */
+  /** one id exports directly; several go through the batch path */
   imageIds: string[]
   onClose: () => void
 }) {
   const [s, setS] = useState<ExportSettings>(DEFAULTS)
+  const [source, setSource] = useState<PhotoSource | null>(null)
   const [presets, setPresets] = useState<Record<string, any>>({})
   const [presetName, setPresetName] = useState('')
   const [busy, setBusy] = useState(false)
   const [pickingDir, setPickingDir] = useState(false)
   const { available: nativePicker, choose } = useFolderChooser()
-  const [result, setResult] = useState<string | null>(null)
+  const [progress, setProgress] = useState<ExportProgress | null>(null)
+  const [report, setReport] = useState<ExportReport | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [localDest, setLocalDest] = useState<string | null>(null)
 
   const many = imageIds.length > 1
+  const local = source?.kind === 'local'
   const set = <K extends keyof ExportSettings>(k: K, v: ExportSettings[K]) =>
     setS((p) => ({ ...p, [k]: v }))
 
   useEffect(() => {
-    api
-      .listExportPresets()
-      .then((r) => setPresets(r.presets ?? {}))
-      .catch(() => setPresets({}))
+    getSource().then((src) => {
+      setSource(src)
+      setLocalDest(src.exportDestinationName?.() ?? null)
+      // Presets are a server-side store; asking a static host for them just
+      // produces a confusing error in the console.
+      if (src.kind === 'server') {
+        api.listExportPresets().then((r) => setPresets(r.presets ?? {})).catch(() => setPresets({}))
+      }
+    })
   }, [])
 
-  // The API only supports 16-bit for PNG; don't let the form build a request
-  // it will reject.
+  // Only PNG supports 16-bit, on either back end; don't let the form build a
+  // request the exporter will reject.
   useEffect(() => {
     if (s.format !== 'png' && s.bit_depth === 16) set('bit_depth', 8)
   }, [s.format, s.bit_depth])
 
-  const body = () => {
-    const b: Record<string, any> = {
-      format: s.format,
-      quality: s.quality,
-      bit_depth: s.bit_depth,
-      color_space: s.color_space,
+  // TIFF has no browser encoder, so a local session that somehow lands on it
+  // (an old preset, a stale state) comes back to JPEG rather than failing.
+  useEffect(() => {
+    if (local && (s.format === 'tiff' || s.bit_depth === 16)) {
+      setS((p) => ({ ...p, format: p.format === 'tiff' ? 'jpeg' : p.format, bit_depth: 8 }))
     }
-    if (s.max_dimension) b.max_dimension = s.max_dimension
-    if (s.output_sharpen) b.output_sharpen = s.output_sharpen
-    if (s.variant) b.variant = s.variant
-    if (s.dest_dir) b.dest_dir = s.dest_dir
-    if (s.watermark && (s.watermark.text || s.watermark.image)) b.watermark = s.watermark
-    return b
-  }
+  }, [local, s.format, s.bit_depth])
 
   const doExport = async () => {
+    if (!source) return
     setBusy(true)
     setError(null)
-    setResult(null)
+    setReport(null)
+    setProgress(null)
     try {
-      if (many) {
-        const b: Record<string, any> = { ...body(), image_ids: imageIds }
-        if (s.filename) b.filename = s.filename
-        const r: any = await api.batchExport(b)
-        setResult(
-          r.count != null
-            ? `Exported ${r.count} image${r.count === 1 ? '' : 's'}`
-            : JSON.stringify(r).slice(0, 200),
-        )
-      } else {
-        const r = await api.exportImage(imageIds[0], body())
-        setResult(r.path)
-      }
+      const r = await source.exportImages(imageIds, s, setProgress)
+      setReport(r)
+      setLocalDest(source.exportDestinationName?.() ?? null)
     } catch (e) {
-      setError(String(e))
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
+      setProgress(null)
     }
   }
 
   const chooseDir = async () => {
+    if (local) {
+      // Must run straight off this click: the browser only opens a directory
+      // picker inside a user gesture.
+      const picked = await source?.chooseExportDestination?.()
+      if (picked) setLocalDest(picked)
+      return
+    }
     if (!nativePicker) {
       setPickingDir(true)
       return
@@ -156,10 +163,17 @@ export function ExportDialog({
 
   const savePreset = async () => {
     if (!presetName) return
-    await api.putExportPreset(presetName, body())
+    // Nulls are stripped rather than stored: a preset is merged *under* the
+    // request's explicit fields, and a stored null would read as "no resize"
+    // rather than "no opinion".
+    const settings = Object.fromEntries(Object.entries(s).filter(([, v]) => v !== null))
+    await api.putExportPreset(presetName, settings)
     setPresets(await api.listExportPresets().then((r) => r.presets ?? {}))
     setPresetName('')
   }
+
+  const failures = report?.results.filter((r) => !r.ok) ?? []
+  const notes = report?.results.filter((r) => r.ok && r.note) ?? []
 
   return (
     <dialog className="modal modal-open">
@@ -169,11 +183,20 @@ export function ExportDialog({
           Export {many ? `${imageIds.length} images` : 'image'}
         </h3>
 
+        {local && (
+          <p className="text-xs opacity-60 mt-1">
+            Rendered here in the browser: JPEG and 8-bit PNG, sRGB, resized and named
+            below. Everything greyed out needs the desktop app.
+          </p>
+        )}
+
         <div className="mt-3 space-y-2 text-xs">
           <Row label="Preset">
             <select
               className="select select-xs select-bordered flex-1"
               defaultValue=""
+              disabled={local}
+              title={local ? NO_SERVER.preset : undefined}
               onChange={(e) => e.target.value && applyPreset(e.target.value)}
             >
               <option value="">Custom…</option>
@@ -207,6 +230,8 @@ export function ExportDialog({
                 <button
                   key={f}
                   className={`btn btn-xs join-item ${s.format === f ? 'btn-primary' : ''}`}
+                  disabled={local && f === 'tiff'}
+                  title={local && f === 'tiff' ? NO_SERVER.tiff : undefined}
                   onClick={() => set('format', f)}
                 >
                   {f.toUpperCase()}
@@ -236,6 +261,8 @@ export function ExportDialog({
                   <button
                     key={d}
                     className={`btn btn-xs join-item ${s.bit_depth === d ? 'btn-primary' : ''}`}
+                    disabled={local && d === 16}
+                    title={local && d === 16 ? NO_SERVER.depth : undefined}
                     onClick={() => set('bit_depth', d)}
                   >
                     {d}-bit
@@ -249,6 +276,8 @@ export function ExportDialog({
             <select
               className="select select-xs select-bordered flex-1"
               value={s.color_space}
+              disabled={local}
+              title={local ? NO_SERVER.space : undefined}
               onChange={(e) => set('color_space', e.target.value as ExportSettings['color_space'])}
             >
               {SPACES.map(([v, l]) => (
@@ -274,6 +303,8 @@ export function ExportDialog({
             <select
               className="select select-xs select-bordered flex-1"
               value={s.output_sharpen ?? ''}
+              disabled={local}
+              title={local ? NO_SERVER.sharpen : undefined}
               onChange={(e) =>
                 set('output_sharpen', (e.target.value || null) as ExportSettings['output_sharpen'])
               }
@@ -290,6 +321,8 @@ export function ExportDialog({
               className="input input-xs input-bordered flex-1"
               placeholder="master"
               value={s.variant ?? ''}
+              disabled={local}
+              title={local ? NO_SERVER.variant : undefined}
               onChange={(e) => set('variant', e.target.value || null)}
             />
           </Row>
@@ -299,6 +332,8 @@ export function ExportDialog({
               type="checkbox"
               className="checkbox checkbox-xs"
               checked={!!s.watermark}
+              disabled={local}
+              title={local ? NO_SERVER.watermark : undefined}
               onChange={(e) =>
                 set(
                   'watermark',
@@ -374,9 +409,11 @@ export function ExportDialog({
           <Row label="Output folder">
             <button className="btn btn-xs flex-1 justify-start font-mono" onClick={chooseDir}>
               <FolderOpen size={12} />
-              <span className="truncate">{s.dest_dir ?? '<library>/exports'}</span>
+              <span className="truncate">
+                {local ? localDest ?? 'choose a folder…' : s.dest_dir ?? '<library>/exports'}
+              </span>
             </button>
-            {nativePicker && (
+            {!local && nativePicker && (
               <button
                 className="btn btn-xs btn-ghost"
                 title="Browse with the in-app tree instead"
@@ -385,12 +422,17 @@ export function ExportDialog({
                 Tree
               </button>
             )}
-            {s.dest_dir && (
+            {!local && s.dest_dir && (
               <button className="btn btn-xs btn-ghost" onClick={() => set('dest_dir', null)}>
                 Reset
               </button>
             )}
           </Row>
+          {local && (
+            <p className="opacity-50 ml-28">
+              Asked for once per session; exporting without choosing one prompts.
+            </p>
+          )}
 
           {many && (
             <Row label="Filename">
@@ -415,22 +457,76 @@ export function ExportDialog({
               className="input input-xs input-bordered flex-1"
               placeholder="preset name"
               value={presetName}
+              disabled={local}
+              title={local ? NO_SERVER.preset : undefined}
               onChange={(e) => setPresetName(e.target.value)}
             />
-            <button className="btn btn-xs" disabled={!presetName} onClick={savePreset}>
+            <button
+              className="btn btn-xs"
+              disabled={!presetName || local}
+              title={local ? NO_SERVER.preset : undefined}
+              onClick={savePreset}
+            >
               <Save size={11} />
             </button>
           </div>
         </div>
 
+        {progress && (
+          <div className="mt-3 text-xs">
+            <div className="flex justify-between">
+              <span className="truncate">
+                {progress.stage === 'write' ? 'Writing' : 'Rendering'} {progress.filename}
+              </span>
+              <span className="font-mono opacity-60">
+                {progress.index}/{progress.total}
+              </span>
+            </div>
+            <progress
+              className="progress progress-primary w-full"
+              value={progress.index - (progress.stage === 'done' ? 0 : 1)}
+              max={progress.total}
+            />
+          </div>
+        )}
+
         {error && <div className="alert alert-error text-xs p-2 mt-2 break-all">{error}</div>}
-        {result && <div className="alert alert-success text-xs p-2 mt-2 break-all">{result}</div>}
+
+        {report && (
+          <div className="mt-2 space-y-1 text-xs">
+            <div className={`alert p-2 break-all ${failures.length ? 'alert-warning' : 'alert-success'}`}>
+              {/* A single export names the file it wrote — that is what the
+                  server dialog always showed, and it is the useful answer. */}
+              {report.written === 1 && report.results.length === 1 && report.results[0].path
+                ? `Exported ${report.results[0].path}`
+                : `Exported ${report.written} of ${report.results.length}` +
+                  (report.destination ? ` to ${report.destination}` : '') +
+                  (failures.length ? ` — ${failures.length} refused` : '')}
+            </div>
+            {/* Refusals are named one by one. "3 refused" tells a photographer
+                nothing; which three and why is the whole point. */}
+            {failures.map((f) => (
+              <div key={f.id} className="break-all opacity-80">
+                <span className="font-mono">{f.filename}</span>: {f.error}
+              </div>
+            ))}
+            {notes.map((n) => (
+              <div key={n.id} className="break-all opacity-60">
+                <span className="font-mono">{n.filename}</span>: {n.note}
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="modal-action">
           <button className="btn btn-sm btn-ghost" onClick={onClose}>
             Close
           </button>
-          <button className="btn btn-sm btn-primary" onClick={doExport} disabled={busy}>
+          <button
+            className="btn btn-sm btn-primary"
+            onClick={doExport}
+            disabled={busy || !source || imageIds.length === 0}
+          >
             {busy ? (
               <span className="loading loading-spinner loading-xs" />
             ) : (

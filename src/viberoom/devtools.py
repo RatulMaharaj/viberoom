@@ -1,8 +1,6 @@
 """Dev/build launcher scripts, exposed as `uv run <name>`.
 
     uv run dev            backend (reload) + Vite dev server together
-    uv run dev-desktop    Tauri app in dev mode (builds the sidecar first)
-    uv run build-desktop  full desktop build: sidecar + Tauri installers
 """
 
 from __future__ import annotations
@@ -61,20 +59,3 @@ def dev() -> None:
             p.wait()
     sys.exit(exit_code)
 
-
-def _build_sidecar() -> None:
-    _run(["bash", str(ROOT / "desktop" / "build-backend.sh")])
-
-
-def dev_desktop() -> None:
-    """Run the Tauri desktop app in dev mode (sidecar built first)."""
-    _build_sidecar()
-    _ensure_node_modules(ROOT / "desktop")
-    _run(["npx", "tauri", "dev"], cwd=ROOT / "desktop")
-
-
-def build_desktop() -> None:
-    """Build desktop installers: frontend + sidecar + Tauri bundle."""
-    _build_sidecar()
-    _ensure_node_modules(ROOT / "desktop")
-    _run(["npx", "tauri", "build"], cwd=ROOT / "desktop")

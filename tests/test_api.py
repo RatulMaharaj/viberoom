@@ -110,7 +110,10 @@ def test_preview_and_thumbnail_revalidate_with_etag(client):
         first = c.get(url, params=params)
         assert first.status_code == 200
         etag = first.headers["etag"]
-        assert "immutable" in first.headers["cache-control"]
+        # Not "immutable": these URLs do not name their own content, so a
+        # browser allowed to skip revalidation shows a stale render after an
+        # edit. Revalidating is the point; the ETag is what makes it cheap.
+        assert "must-revalidate" in first.headers["cache-control"]
 
         again = c.get(url, params=params, headers={"If-None-Match": etag})
         assert again.status_code == 304, url

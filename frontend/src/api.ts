@@ -43,8 +43,19 @@ export interface Filters {
   offset?: number
 }
 
+/** No backend is reachable, so this call can never succeed. */
+export class NoServerError extends Error {}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`)
+  // A 200 is not proof of an API. Serve this app as a static site — which is
+  // the whole point of the PWA — and any host worth using answers an unknown
+  // path with the app shell rather than a 404. So a call to a server that is
+  // not there comes back as a cheerful 200 of HTML, and res.json() fails with
+  // "Unexpected token '<'", which says nothing about the actual problem.
+  if (!(res.headers.get('content-type') ?? '').includes('application/json')) {
+    throw new NoServerError(`${res.url} did not return JSON — no backend here`)
+  }
   return res.json()
 }
 

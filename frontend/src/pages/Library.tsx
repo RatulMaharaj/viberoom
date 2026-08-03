@@ -1,20 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { Boxes, ArrowDown, ArrowUp, CheckSquare, Download, FolderOpen, RefreshCw, Square } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { api, type Filters, type Flag, type ImageMeta } from '../api'
+import { getSource, type Filters, type Flag, type ImageMeta, type PhotoSource } from '../source'
 import { Brand } from '../components/Brand'
 import { ImageCard } from '../components/ImageCard'
 import { useFolderChooser } from '../folderChooser'
 import { ExportDialog } from '../components/ExportDialog'
 import { OrganizePanel } from '../components/OrganizePanel'
 import { FolderPicker } from '../components/FolderPicker'
+import { LibraryPicker } from '../components/LibraryPicker'
 import { ModuleTabs } from '../components/ModuleTabs'
+import { useThumbnails } from '../local/useThumbnails'
 import { loadFilters, saveFilters } from '../filters'
 import { onSidecarChange } from '../events'
 import { loadLastImage, saveLastImage } from '../selection'
 import { handleUndoKey, pushAction } from '../undo'
 
 export function Library() {
+  const [source, setSource] = useState<PhotoSource | null>(null)
   const [libraryPath, setLibraryPath] = useState<string | null>(null)
   const [pathInput, setPathInput] = useState('')
   const [images, setImages] = useState<ImageMeta[]>([])
@@ -48,34 +51,61 @@ export function Library() {
     [images, idFilterSet],
   )
 
+  // Local thumbnails are decoded blobs with a lifetime; server ones are URLs.
+  // Only the local build pays for the hook.
+  const local = source?.kind === 'local'
+
   const refresh = useCallback(() => {
-    api
-      .listImages(filters)
+    getSource()
+      .then((s) => s.listImages(filters))
       .then((r) => setImages(r.images))
       .catch(() => setImages([]))
   }, [filters])
 
   useEffect(() => {
-    api.getLibrary().then((r) => {
-      setLibraryPath(r.library)
-      if (r.library) {
-        refresh()
-        api.listExts().then((x) => setExts(x.exts))
-      }
+    getSource().then((s) => {
+      setSource(s)
+      return s.getLibrary().then((r) => {
+        setLibraryPath(r.library)
+        if (r.library) {
+          refresh()
+          s.listExts().then(setExts)
+        }
+      })
     })
   }, [refresh])
 
-  // live refresh when agents edit sidecars on disk
-  useEffect(() => onSidecarChange(() => refresh()), [refresh])
+  // Live refresh when agents edit sidecars on disk. Server-only: the event
+  // stream is an endpoint, and locally nothing else is writing the folder.
+  // `source` and not `local`: local starts false while the probe is in flight,
+  // so keying on it alone opened the stream before we knew there was nothing
+  // to stream from — and a static host answers /events with HTML, which
+  // EventSource rejects loudly.
+  useEffect(
+    () => (!source || local ? undefined : onSidecarChange(() => refresh())),
+    [source, local, refresh],
+  )
 
-  const openLibrary = async (path: string) => {
+  // Locally, EXIF lands after the grid has already painted — see the backfill
+  // in local/index.ts. Re-listing is how it reaches the cards.
+  useEffect(() => source?.subscribe?.(refresh), [source, refresh])
+
+  /** Open a library and show it. `mode` is 'restore' only in the no-server
+   *  build, where the folder is already chosen and permission has just been
+   *  re-granted — prompting for it again would be nonsense. */
+  const openLibrary = async (path?: string, mode: 'open' | 'restore' = 'open') => {
     setError(null)
     setShowPicker(false)
+    const s = await getSource()
     try {
-      const r = await api.setLibrary(path)
+      const r = mode === 'restore' ? await s.getLibrary() : await s.openLibrary(path)
       setLibraryPath(r.library)
+      s.listExts().then(setExts)
       refresh()
     } catch (e) {
+      // The browser's picker throws AbortError when the user closes it, which
+      // is a decision, not an error worth showing.
+      if (e instanceof DOMException && e.name === 'AbortError') return
       setError(String(e))
     }
   }
@@ -92,22 +122,21 @@ export function Library() {
 
   const setRating = useCallback((id: string, rating: number) => {
     const prev = imagesRef.current.find((im) => im.id === id)?.rating ?? 0
-    pushAction({
-      undo: () => api.setRating(id, prev),
-      redo: () => api.setRating(id, rating),
-    })
+    const write = (r: number) => getSource().then((s) => s.setRating(id, r))
+    pushAction({ undo: () => write(prev), redo: () => write(rating) })
     patchLocal(id, { rating })
-    api.setRating(id, rating)
+    write(rating)
   }, [])
   const setFlag = useCallback((id: string, flag: Flag) => {
     const prev = imagesRef.current.find((im) => im.id === id)?.flag ?? null
-    pushAction({
-      undo: () => api.setFlag(id, prev),
-      redo: () => api.setFlag(id, flag),
-    })
+    const write = (f: Flag) => getSource().then((s) => s.setFlag(id, f))
+    pushAction({ undo: () => write(prev), redo: () => write(flag) })
     patchLocal(id, { flag })
-    api.setFlag(id, flag)
+    write(flag)
   }, [])
+
+  // Empty in server mode, where ImageCard keeps its plain thumbnail URL.
+  const thumbs = useThumbnails(source, shown, local)
 
   const openImage = useCallback((id: string) => navigate(`/edit/${id}`), [navigate])
   const onCardClick = useCallback(
@@ -157,6 +186,15 @@ export function Library() {
         <div className="hero-content flex-col">
           <h1 className="font-brand text-4xl font-bold tracking-tight">Viberoom</h1>
           <p className="opacity-70">Point at a local folder of photos to get started.</p>
+          {/* No server means no path to type: the browser will only open a
+              folder the user points at, from inside a real click. */}
+          {local ? (
+            <LibraryPicker
+              onOpen={() => openLibrary()}
+              onReconnect={() => openLibrary(undefined, 'restore')}
+            />
+          ) : (
+          <>
           <div className="join w-full max-w-xl">
             <input
               className="input input-bordered join-item flex-1 font-mono"
@@ -186,8 +224,15 @@ export function Library() {
               </button>
             )}
           </div>
+          </>
+          )}
           {error && <div className="alert alert-error text-sm">{error}</div>}
-          {showPicker && (
+          {/* Server-mode only. It browses the *server's* disk over the API, so
+              with no backend it has nothing to list — and asking anyway is how
+              a static host's "here's the app shell" reply for /api/v1/fs ends
+              up parsed as JSON. The browser's own picker is what local mode
+              uses, and it is the same native dialog. */}
+          {showPicker && !local && (
             <FolderPicker
               onSelect={openLibrary}
               onClose={() => setShowPicker(false)}
@@ -265,7 +310,10 @@ export function Library() {
             {filters.order === 'asc' ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
           </button>
         </div>
-        <button className="btn btn-sm" onClick={() => api.scan().then(refresh)}>
+        <button
+          className="btn btn-sm"
+          onClick={() => getSource().then((s) => s.scan()).then(refresh)}
+        >
           <RefreshCw size={14} /> Rescan
         </button>
         <button
@@ -278,9 +326,17 @@ export function Library() {
           {multi.length ? <Square size={14} /> : <CheckSquare size={14} />}
           {multi.length ? `${multi.length} selected` : 'Select all'}
         </button>
+        {/* Organize needs the server's catalog and says so rather than failing
+            on click. Export no longer does: the browser renders and writes the
+            files itself, and the options it cannot do are disabled inside the
+            dialog. */}
         <button
           className="btn btn-sm btn-primary"
-          title="Export the selection (or the current image)"
+          title={
+            local
+              ? 'Export the selection — rendered here, written to a folder you pick'
+              : 'Export the selection (or the current image)'
+          }
           disabled={!multi.length && !selected}
           onClick={() => setExportOpen(true)}
         >
@@ -288,7 +344,12 @@ export function Library() {
         </button>
         <button
           className={`btn btn-sm ${organize ? 'btn-primary' : ''}`}
-          title="Collections, stacks, merge, import, faces, map, tether"
+          title={
+            local
+              ? 'Collections, stacks and the rest need the desktop app'
+              : 'Collections, stacks, merge, import, faces, map, tether'
+          }
+          disabled={local}
           onClick={() => setOrganize((v) => !v)}
         >
           <Boxes size={14} /> Organize
@@ -305,6 +366,8 @@ export function Library() {
             image={im}
             selected={selected === im.id}
             multi={multiSet.has(im.id)}
+            thumbSrc={thumbs[im.id]}
+            local={local}
             onClick={onCardClick}
             onOpen={openImage}
             onRate={setRating}
