@@ -588,10 +588,19 @@ void main() {
 }`
 
 /** Copies the float intermediate out to the 8-bit canvas. */
+// The one place the pipeline flips vertically, and it has to.
+//
+// Every pass before this one is self-consistent: texImage2D puts source row 0
+// at texel row 0, and each pass writes gl_FragCoord.y into the same row it
+// read. But this pass draws into the default framebuffer, whose origin is
+// bottom-left rather than top-left — so row 0 of the image would land at the
+// bottom of the canvas, and the preview would be upside down. It was, until a
+// frame with a bright top and dark bottom was rendered and read back.
 export const PRESENT_SOURCE = `#version 300 es
 precision highp float;
 uniform sampler2D uFrame;
 out vec4 fragColor;
 void main() {
-  fragColor = vec4(texelFetch(uFrame, ivec2(gl_FragCoord.xy), 0).rgb, 1.0);
+  int y = textureSize(uFrame, 0).y - 1 - int(gl_FragCoord.y);
+  fragColor = vec4(texelFetch(uFrame, ivec2(int(gl_FragCoord.x), y), 0).rgb, 1.0);
 }`

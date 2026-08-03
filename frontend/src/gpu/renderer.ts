@@ -664,6 +664,12 @@ export class GpuRenderer {
 
   /** RGBA bytes of the canvas as last drawn. Only used by the smoke test —
    *  a readback stalls the pipeline and has no place in the render loop. */
+  /** Pixels of the presented canvas, **bottom row first**.
+   *
+   *  glReadPixels counts from the bottom-left, and the present pass flips the
+   *  frame so the image is the right way up on screen — so this comes back in
+   *  the opposite order to the image. Only the 1x1 capability probe reads it,
+   *  where that cannot matter; anything larger has to reverse the rows. */
   readPixels(): Uint8Array {
     const { width, height } = this.size
     const out = new Uint8Array(width * height * 4)
