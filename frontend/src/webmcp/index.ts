@@ -23,12 +23,25 @@ export function installWebMcp(): number {
   // A draft API in one browser behind a flag: it may reject a tool shape it
   // does not recognise, and that must stay this function's problem. Leaving it
   // to throw took the entire app down the first time the flag was switched on.
+  //
+  // If the batch call is refused, fall back to registering one at a time. That
+  // salvages the tools the browser does accept, and — more usefully — names the
+  // one it does not, which a single rejected batch never tells you.
   try {
     ctx.provideContext({ tools })
     installed = tools.length
-  } catch (err) {
-    console.warn('WebMCP registration rejected our tools', err)
-    return 0
+  } catch (batchErr) {
+    console.warn('WebMCP provideContext refused the batch, trying one by one', batchErr)
+    installed = 0
+    for (const tool of tools) {
+      try {
+        ctx.registerTool?.(tool)
+        installed += 1
+      } catch (toolErr) {
+        console.warn(`WebMCP rejected tool "${tool.name}"`, toolErr)
+      }
+    }
+    if (!installed) return 0
   }
   // The bundle has no stable module handle, so hang the introspection helpers
   // somewhere a person can reach them from devtools.
