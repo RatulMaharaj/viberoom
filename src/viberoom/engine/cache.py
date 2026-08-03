@@ -39,7 +39,7 @@ _decode_cache = DecodeCache()
 
 
 # bump when pipeline math changes so cached previews re-render
-PIPELINE_VERSION = 2
+PIPELINE_VERSION = 3
 
 
 def preview_cache_key(path: Path, recipe: Recipe, size: int) -> str:
@@ -69,3 +69,11 @@ def render_full(path: Path, recipe: Recipe) -> np.ndarray:
     """Full-resolution render for export (no disk cache)."""
     linear = decode_linear(path, half_size=False)
     return render(linear, recipe)
+
+
+def render_full_float(path: Path, recipe: Recipe) -> np.ndarray:
+    """Full-resolution float [0,1] render for high-bit-depth export."""
+    from viberoom.engine.pipeline import render_float
+
+    linear = decode_linear(path, half_size=False)
+    return render_float(linear, recipe)

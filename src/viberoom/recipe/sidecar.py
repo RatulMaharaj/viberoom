@@ -19,6 +19,7 @@ from viberoom.recipe.schema import Recipe
 SIDECAR_SUFFIX = ".vibe.json"
 
 Flag = Literal["pick", "reject"] | None
+Label = Literal["red", "yellow", "green", "blue", "purple"] | None
 
 
 class Sidecar(BaseModel):
@@ -27,6 +28,8 @@ class Sidecar(BaseModel):
     version: int = 1
     rating: int = Field(default=0, ge=0, le=5)
     flag: Flag = None
+    label: Label = None
+    keywords: list[str] = Field(default_factory=list)
     recipe: Recipe = Field(default_factory=Recipe)
 
 

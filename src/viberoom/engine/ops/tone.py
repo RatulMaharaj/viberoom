@@ -63,14 +63,31 @@ def apply_contrast(img: np.ndarray, contrast: float) -> np.ndarray:
     return x * (1 - t) + (sig if contrast > 0 else x + (x - sig)) * t
 
 
-def apply_tone_curve(img: np.ndarray, curve: ToneCurve) -> np.ndarray:
-    """Monotone piecewise-linear LUT in display space."""
-    pts = curve.points
-    if pts == [(0.0, 0.0), (255.0, 255.0)] or pts == [(0, 0), (255, 255)]:
-        return img
+def _is_identity(pts: list[tuple[float, float]]) -> bool:
+    return pts in ([(0.0, 0.0), (255.0, 255.0)], [(0, 0), (255, 255)])
+
+
+def _curve_lut(pts: list[tuple[float, float]]) -> np.ndarray:
     xs = np.array([p[0] for p in pts]) / 255.0
     ys = np.array([p[1] for p in pts]) / 255.0
-    lut_x = np.linspace(0, 1, 1024)
-    lut_y = np.interp(lut_x, xs, ys)
-    idx = np.clip((np.clip(img, 0, 1) * 1023).astype(np.int32), 0, 1023)
-    return lut_y[idx].astype(np.float32)
+    return np.interp(np.linspace(0, 1, 1024), xs, ys)
+
+
+def apply_tone_curve(img: np.ndarray, curve: ToneCurve) -> np.ndarray:
+    """Monotone piecewise-linear LUTs in display space: a luminance curve
+    applied to all channels, then optional per-channel R/G/B curves."""
+    out = img
+    if not _is_identity(curve.points):
+        lut = _curve_lut(curve.points)
+        idx = np.clip((np.clip(out, 0, 1) * 1023).astype(np.int32), 0, 1023)
+        out = lut[idx].astype(np.float32)
+    channels = (curve.red, curve.green, curve.blue)
+    if any(not _is_identity(c) for c in channels):
+        out = np.clip(out, 0, 1).copy()
+        for i, pts in enumerate(channels):
+            if _is_identity(pts):
+                continue
+            lut = _curve_lut(pts)
+            idx = np.clip((out[..., i] * 1023).astype(np.int32), 0, 1023)
+            out[..., i] = lut[idx].astype(np.float32)
+    return out
