@@ -73,15 +73,14 @@ export function detectGpuSupport(): boolean {
 /**
  * Is the GPU path allowed in this session?
  *
- * Opt-in for now. The shader arithmetic is checked against the Python ops to
- * within 4e-7 by a numpy transcription, and the smoke test above catches a
- * driver that renders garbage — but no part of this has yet run on an actual
- * GPU, and the smoke test only exercises the present pass, not the HSL or
- * grading maths. Until someone has loaded `?gpu=1` and confirmed a real frame,
- * detection is not allowed to switch this on by itself.
+ * On by default where detection says it will work. It shipped opt-in until a
+ * real frame had been confirmed on real hardware (Apple M4 / ANGLE Metal),
+ * since the numpy parity check and the smoke test above, between them, still
+ * cannot prove a driver renders the whole chain correctly.
  *
- * To make it the default afterwards: `return gpuOverride() ?? detectGpuSupport()`.
+ * `?gpu=0` remains the escape hatch, and every recipe the shader does not
+ * implement still falls back on its own.
  */
 export function gpuEnabled(): boolean {
-  return gpuOverride() ?? false
+  return gpuOverride() ?? detectGpuSupport()
 }
