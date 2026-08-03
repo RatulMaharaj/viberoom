@@ -115,11 +115,22 @@ class ColorGrading(StrictModel):
     )
 
 
+class Lut(StrictModel):
+    """A .cube LUT from ~/.viberoom/luts/. stage 'pre' applies right after
+    the gamma transform (camera-matching profiles); 'post' applies at the
+    end of the color chain (creative looks)."""
+
+    name: str | None = Field(default=None, description="LUT name (file stem); null = none.")
+    strength: float = Field(default=100, ge=0, le=100)
+    stage: Literal["pre", "post"] = "post"
+
+
 class Color(StrictModel):
     saturation: float = Field(default=0, ge=-100, le=100)
     vibrance: float = Field(default=0, ge=-100, le=100)
     hsl: HSL = Field(default_factory=HSL)
     grading: ColorGrading = Field(default_factory=ColorGrading)
+    lut: Lut = Field(default_factory=Lut)
 
 
 class Sharpening(StrictModel):
@@ -161,11 +172,22 @@ class Crop(StrictModel):
         return v
 
 
+class Perspective(StrictModel):
+    """Keystone correction (Upright-style). vertical fixes converging
+    verticals (positive = camera was pointing up); horizontal fixes
+    converging horizontals. scale zooms to hide warped borders."""
+
+    vertical: float = Field(default=0, ge=-100, le=100)
+    horizontal: float = Field(default=0, ge=-100, le=100)
+    scale: float = Field(default=100, ge=50, le=150, description="Percent zoom applied after the warp.")
+
+
 class Geometry(StrictModel):
     rotate: float = Field(default=0, ge=-45, le=45, description="Straighten angle in degrees, CW positive.")
     orientation: Literal[0, 90, 180, 270] = Field(default=0, description="Coarse rotation in degrees CW.")
     flipH: bool = False
     flipV: bool = False
+    perspective: Perspective = Field(default_factory=Perspective)
     crop: Crop = Field(default_factory=Crop)
 
 
@@ -254,16 +276,89 @@ class ColorRangeMask(MaskBase):
     range: float = Field(default=30, ge=5, le=180, description="Hue distance of influence, degrees.")
 
 
-Mask = LinearGradientMask | RadialGradientMask | LuminanceRangeMask | ColorRangeMask
+class BrushStroke(StrictModel):
+    """One painted stroke: a polyline of normalized [x, y] points with a
+    round, feathered tip. Radius is a fraction of the shorter image side."""
+
+    points: list[tuple[float, float]] = Field(min_length=1)
+    radius: float = Field(default=0.05, gt=0, le=0.5)
+    feather: float = Field(default=50, ge=0, le=100)
+    flow: float = Field(default=100, gt=0, le=100, description="Strength this stroke adds.")
+    erase: bool = Field(default=False, description="Subtract from the mask instead of adding.")
+
+
+class BrushMask(MaskBase):
+    """Freeform painted mask built from strokes, applied in order (so erase
+    strokes carve out earlier ones). Coordinates are normalized 0-1 in the
+    final rendered frame."""
+
+    type: Literal["brush"] = "brush"
+    strokes: list[BrushStroke] = Field(min_length=1)
+
+
+class AiMask(MaskBase):
+    """Content-aware mask: 'subject' selects the main subject, 'background'
+    its complement, 'sky' the sky region. Uses the best available backend
+    (U2-Net via the optional ml extra, else built-in heuristics)."""
+
+    type: Literal["subject", "background", "sky"]
+
+
+Mask = (
+    LinearGradientMask | RadialGradientMask | LuminanceRangeMask | ColorRangeMask
+    | BrushMask | AiMask
+)
+
+
+class Defringe(StrictModel):
+    amount: float = Field(default=0, ge=0, le=100, description="Desaturate purple/green fringing at edges.")
+
+
+class Lens(StrictModel):
+    """Manual lens corrections, applied first in the pipeline (pre-crop)."""
+
+    distortion: float = Field(
+        default=0, ge=-100, le=100,
+        description="Positive corrects barrel (bulge), negative corrects pincushion.",
+    )
+    vignette: float = Field(
+        default=0, ge=-100, le=100,
+        description="Positive brightens corners (corrects lens falloff).",
+    )
+    caRed: float = Field(
+        default=0, ge=-100, le=100,
+        description="Lateral CA: radial scale of the red channel, ~0.1% per 100.",
+    )
+    caBlue: float = Field(default=0, ge=-100, le=100, description="Lateral CA for the blue channel.")
+    defringe: Defringe = Field(default_factory=Defringe)
+
+
+class RetouchSpot(StrictModel):
+    """Copy a circular patch from `source` onto `dest`. Mode 'heal' matches
+    the patch to the destination's illumination (texture from source, light
+    from dest); 'clone' copies pixels as-is. Coordinates normalized 0-1 in
+    the final rendered frame; radius is a fraction of the shorter side."""
+
+    mode: Literal["heal", "clone"] = "heal"
+    source: tuple[float, float]
+    dest: tuple[float, float]
+    radius: float = Field(gt=0, le=0.25)
+    feather: float = Field(default=50, ge=0, le=100)
+    opacity: float = Field(default=100, gt=0, le=100)
 
 
 class Recipe(StrictModel):
+    lens: Lens = Field(default_factory=Lens)
     whiteBalance: WhiteBalance = Field(default_factory=WhiteBalance)
     tone: Tone = Field(default_factory=Tone)
     color: Color = Field(default_factory=Color)
     detail: Detail = Field(default_factory=Detail)
     geometry: Geometry = Field(default_factory=Geometry)
     effects: Effects = Field(default_factory=Effects)
+    retouch: list[RetouchSpot] = Field(
+        default_factory=list,
+        description="Heal/clone spots, applied in order after geometry (coordinates are post-crop).",
+    )
     masks: list[Mask] = Field(
         default_factory=list,
         description="Local adjustments, applied in order after global edits (coordinates are post-crop).",

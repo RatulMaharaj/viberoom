@@ -16,6 +16,12 @@ dependencies = [
     "uvicorn[standard]>=0.52.1",
 ]
 
+[project.optional-dependencies]
+ml = [
+    "onnxruntime>=1.20",   # faces (UltraFace) + pluggable denoise/super-resolution
+    "rembg>=2.0.61",       # U2-Net subject masks (auto-downloads weights on first use)
+]
+
 [project.scripts]
 viberoom = "viberoom:main"
 viberoom-mcp = "viberoom.mcp_server:main"
@@ -27,4 +33,6 @@ build-backend = "hatchling.build"
 [tool.uv]
 dev-dependencies = [
     "pytest>=9.1.1",
+    "onnx>=1.17",          # authoring tiny models in ML tests
+    "onnxruntime>=1.20",   # exercising the ML paths in tests
 ]

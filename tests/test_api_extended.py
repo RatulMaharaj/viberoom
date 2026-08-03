@@ -241,3 +241,87 @@ def test_auto_preserves_masks_and_effects(client):
     body = r.json()
     assert body["effects"]["vignette"]["amount"] == -30
     assert len(body["masks"]) == 1
+
+
+# ---------- history / snapshots (#10) ----------
+
+def test_history_records_and_restores(client):
+    c, _ = client
+    iid = _ids(c)[0]
+    c.patch(f"/api/v1/images/{iid}/recipe", json={"tone": {"exposure": 1.0}})
+    c.patch(f"/api/v1/images/{iid}/recipe", json={"tone": {"exposure": 2.0}})
+    h = c.get(f"/api/v1/images/{iid}/history").json()
+    assert len(h["entries"]) == 2  # default recipe, then exposure=1.0
+
+    entry = c.get(f"/api/v1/images/{iid}/history/1").json()
+    assert entry["recipe"]["tone"]["exposure"] == 1.0
+
+    r = c.post(f"/api/v1/images/{iid}/history/1/restore")
+    assert r.json()["tone"]["exposure"] == 1.0
+    assert c.get(f"/api/v1/images/{iid}/recipe").json()["tone"]["exposure"] == 1.0
+    # the restore itself pushed exposure=2.0 to history (undoable)
+    h2 = c.get(f"/api/v1/images/{iid}/history").json()
+    assert len(h2["entries"]) == 3
+
+
+def test_unchanged_recipe_writes_no_history(client):
+    c, _ = client
+    iid = _ids(c)[0]
+    c.patch(f"/api/v1/images/{iid}/recipe", json={"tone": {"exposure": 1.0}})
+    c.patch(f"/api/v1/images/{iid}/recipe", json={"tone": {"exposure": 1.0}})  # no-op
+    h = c.get(f"/api/v1/images/{iid}/history").json()
+    assert len(h["entries"]) == 1
+
+
+def test_snapshot_save_restore_delete(client):
+    c, _ = client
+    iid = _ids(c)[0]
+    c.patch(f"/api/v1/images/{iid}/recipe", json={"tone": {"contrast": 40}})
+    c.put(f"/api/v1/images/{iid}/snapshots/punchy")
+    c.patch(f"/api/v1/images/{iid}/recipe", json={"tone": {"contrast": 0}})
+
+    r = c.post(f"/api/v1/images/{iid}/snapshots/punchy/restore")
+    assert r.json()["tone"]["contrast"] == 40
+    assert c.get(f"/api/v1/images/{iid}/recipe").json()["tone"]["contrast"] == 40
+
+    assert c.delete(f"/api/v1/images/{iid}/snapshots/punchy").status_code == 200
+    assert c.post(f"/api/v1/images/{iid}/snapshots/punchy/restore").status_code == 404
+
+
+# ---------- virtual copies (#11) ----------
+
+def test_variant_create_render_export_promote(client):
+    c, _ = client
+    iid = _ids(c)[0]
+    c.patch(f"/api/v1/images/{iid}/recipe", json={"tone": {"exposure": 0.5}})
+    # variant with an explicit recipe
+    r = c.put(f"/api/v1/images/{iid}/variants/bw", json={
+        "recipe": {"color": {"saturation": -100}},
+    })
+    assert r.status_code == 200
+    assert "bw" in c.get(f"/api/v1/images/{iid}/history").json()["variants"]
+
+    # renders independently of the main recipe
+    pv = c.get(f"/api/v1/images/{iid}/preview", params={"size": 256, "variant": "bw"})
+    assert pv.status_code == 200
+    assert c.get(f"/api/v1/images/{iid}/preview",
+                 params={"size": 256, "variant": "nope"}).status_code == 404
+
+    # exports with a variant-suffixed filename
+    ex = c.post(f"/api/v1/images/{iid}/export", json={"variant": "bw", "max_dimension": 64})
+    assert ex.json()["path"].endswith("-bw.jpg")
+
+    # promote: variant becomes main, old main goes to history
+    c.post(f"/api/v1/images/{iid}/variants/bw/promote")
+    main = c.get(f"/api/v1/images/{iid}/recipe").json()
+    assert main["color"]["saturation"] == -100
+
+    assert c.delete(f"/api/v1/images/{iid}/variants/bw").status_code == 200
+
+
+def test_variant_copies_current_recipe_when_body_omitted(client):
+    c, _ = client
+    iid = _ids(c)[0]
+    c.patch(f"/api/v1/images/{iid}/recipe", json={"tone": {"clarity": 33}})
+    r = c.put(f"/api/v1/images/{iid}/variants/copy")
+    assert r.json()["recipe"]["tone"]["clarity"] == 33

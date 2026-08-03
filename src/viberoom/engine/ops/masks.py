@@ -13,6 +13,9 @@ from viberoom.engine.ops.blur import fast_blur
 from viberoom.engine.ops.presence import apply_clarity, apply_dehaze
 from viberoom.engine.ops.tone import apply_contrast, apply_regions
 from viberoom.recipe.schema import (
+    AiMask,
+    BrushMask,
+    BrushStroke,
     ColorRangeMask,
     LinearGradientMask,
     LocalAdjustments,
@@ -39,6 +42,55 @@ def _coord_grids(h: int, w: int) -> tuple[np.ndarray, np.ndarray]:
     y = (np.arange(h, dtype=np.float32) + 0.5) / h
     x = (np.arange(w, dtype=np.float32) + 0.5) / w
     return np.broadcast_to(x[None, :], (h, w)), np.broadcast_to(y[:, None], (h, w))
+
+
+def _dist_to_polyline(xx: np.ndarray, yy: np.ndarray, pts_px: list[tuple[float, float]]) -> np.ndarray:
+    """Min distance (px) from each grid pixel to a polyline (or single point)."""
+    d = np.full(xx.shape, np.inf, dtype=np.float32)
+    if len(pts_px) == 1:
+        px, py = pts_px[0]
+        return np.sqrt((xx - px) ** 2 + (yy - py) ** 2).astype(np.float32)
+    for (x0, y0), (x1, y1) in zip(pts_px, pts_px[1:]):
+        vx, vy = x1 - x0, y1 - y0
+        norm = vx * vx + vy * vy
+        if norm < 1e-9:
+            seg = np.sqrt((xx - x0) ** 2 + (yy - y0) ** 2)
+        else:
+            t = np.clip(((xx - x0) * vx + (yy - y0) * vy) / norm, 0, 1)
+            seg = np.sqrt((xx - (x0 + t * vx)) ** 2 + (yy - (y0 + t * vy)) ** 2)
+        d = np.minimum(d, seg.astype(np.float32))
+    return d
+
+
+def stroke_weight(stroke: BrushStroke, h: int, w: int) -> np.ndarray:
+    """Rasterize one stroke to an HxW weight map, computed only inside the
+    stroke's bounding box for speed."""
+    r_px = stroke.radius * min(h, w)
+    pts_px = [(x * w, y * h) for x, y in stroke.points]
+    xs = [p[0] for p in pts_px]
+    ys = [p[1] for p in pts_px]
+    pad = int(np.ceil(r_px)) + 2
+    x0, x1 = max(0, int(min(xs)) - pad), min(w, int(max(xs)) + pad)
+    y0, y1 = max(0, int(min(ys)) - pad), min(h, int(max(ys)) + pad)
+    out = np.zeros((h, w), dtype=np.float32)
+    if x1 <= x0 or y1 <= y0:
+        return out
+    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+    d = _dist_to_polyline(xx + 0.5, yy + 0.5, pts_px)
+    hard = r_px * (1.0 - stroke.feather / 100)
+    out[y0:y1, x0:x1] = (1.0 - _smoothstep(hard, max(r_px, hard + 0.5), d)) * (stroke.flow / 100)
+    return out
+
+
+def _brush_weight(mask: BrushMask, h: int, w: int) -> np.ndarray:
+    weight = np.zeros((h, w), dtype=np.float32)
+    for stroke in mask.strokes:
+        sw = stroke_weight(stroke, h, w)
+        if stroke.erase:
+            weight = weight * (1.0 - sw)
+        else:
+            weight = 1.0 - (1.0 - weight) * (1.0 - sw)  # accumulate like paint
+    return weight
 
 
 def mask_weight(mask: Mask, img: np.ndarray) -> np.ndarray:
@@ -68,6 +120,12 @@ def mask_weight(mask: Mask, img: np.ndarray) -> np.ndarray:
         lo = np.ones_like(lum) if mask.lumMin <= 0 else _smoothstep(mask.lumMin - f, mask.lumMin + f, lum)
         hi = np.zeros_like(lum) if mask.lumMax >= 100 else _smoothstep(mask.lumMax - f, mask.lumMax + f, lum)
         weight = lo * (1.0 - hi)
+    elif isinstance(mask, BrushMask):
+        weight = _brush_weight(mask, h, w)
+    elif isinstance(mask, AiMask):
+        from viberoom.engine.ops.ai_masks import ai_mask_weight
+
+        weight = ai_mask_weight(mask.type, np.clip(img, 0, 1))
     elif isinstance(mask, ColorRangeMask):
         x = np.clip(img, 0, 1)
         maxc, minc = x.max(axis=-1), x.min(axis=-1)

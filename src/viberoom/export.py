@@ -28,7 +28,7 @@ def default_extension(fmt: ExportFormat) -> str:
     return _EXTENSIONS[fmt]
 
 
-def _write_png16(arr: np.ndarray, out_path: Path) -> None:
+def _write_png16(arr: np.ndarray, out_path: Path, icc: bytes | None = None) -> None:
     """Minimal 16-bit RGB PNG writer (big-endian samples, per PNG spec)."""
     h, w = arr.shape[:2]
     raw = arr.astype(">u2").tobytes()
@@ -44,23 +44,38 @@ def _write_png16(arr: np.ndarray, out_path: Path) -> None:
         )
 
     ihdr = struct.pack(">IIBBBBB", w, h, 16, 2, 0, 0, 0)  # depth 16, color RGB
+    color_chunk = (
+        chunk(b"iCCP", b"ICC profile\x00\x00" + zlib.compress(icc, 6))
+        if icc else chunk(b"sRGB", b"\x00")
+    )
     payload = (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", ihdr)
-        + chunk(b"sRGB", b"\x00")
+        + color_chunk
         + chunk(b"IDAT", zlib.compress(scanlines, 6))
         + chunk(b"IEND", b"")
     )
     out_path.write_bytes(payload)
 
 
-def _source_exif(src: Path) -> bytes:
-    """Basic EXIF carry-over when the source has it (best-effort for RAW)."""
+def _source_exif(src: Path, iptc: dict | None = None) -> bytes:
+    """Basic EXIF carry-over when the source has it (best-effort for RAW),
+    plus IPTC-style description fields mapped onto standard EXIF tags."""
     try:
         with Image.open(src) as orig:
-            return orig.getexif().tobytes()
+            exif = orig.getexif()
+    except Exception:
+        exif = Image.Exif()
+    for tag, key in ((270, "caption"), (315, "creator"), (33432, "copyright")):
+        if iptc and iptc.get(key):
+            exif[tag] = iptc[key]
+    try:
+        return exif.tobytes()
     except Exception:
         return b""
+
+
+ColorSpace = Literal["srgb", "display-p3", "adobe-rgb", "prophoto"]
 
 
 def export_image(
@@ -71,8 +86,21 @@ def export_image(
     quality: int = 90,
     bit_depth: Literal[8, 16] = 8,
     max_dimension: int | None = None,
+    iptc: dict | None = None,
+    color_space: ColorSpace = "srgb",
+    watermark: dict | None = None,
+    output_sharpen: Literal["screen", "matte", "glossy"] | None = None,
 ) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if color_space == "srgb":
+        icc = _SRGB_ICC
+        convert = None
+    else:
+        from viberoom.color_mgmt import convert_from_srgb, profile_bytes
+
+        icc = profile_bytes(color_space)
+        convert = lambda arr: convert_from_srgb(arr, color_space)[0]  # noqa: E731
 
     if fmt == "png" and bit_depth == 16:
         rgbf = render_full_float(src, recipe)
@@ -88,23 +116,50 @@ def export_image(
                 for c in range(3)
             ]
             rgbf = np.clip(np.stack(chans, axis=-1), 0, 1)
-        _write_png16((rgbf * 65535).round().astype(np.uint16), out_path)
+        if convert is not None:
+            rgbf = convert(rgbf)
+        _write_png16(
+            (rgbf * 65535).round().astype(np.uint16), out_path,
+            icc=None if color_space == "srgb" else icc,
+        )
         return out_path
 
     rgb = render_full(src, recipe)
+    if convert is not None:
+        rgb = (convert(rgb.astype(np.float32) / 255.0) * 255).round().astype(np.uint8)
     im = Image.fromarray(rgb)
     if max_dimension:
         im.thumbnail((max_dimension, max_dimension), Image.LANCZOS)
 
+    if output_sharpen:
+        from viberoom.export_extras import output_sharpen as sharpen_fn
+
+        im = sharpen_fn(im, output_sharpen)
+    if watermark and (watermark.get("text") or watermark.get("image")):
+        from viberoom.export_extras import apply_watermark
+
+        im = apply_watermark(
+            im,
+            text=watermark.get("text"),
+            image_path=watermark.get("image"),
+            position=watermark.get("position", "bottom-right"),
+            opacity=watermark.get("opacity", 60),
+            scale=watermark.get("scale", 20),
+            margin=watermark.get("margin", 2.5),
+        )
+
     if fmt == "jpeg":
         im.save(
             out_path, "JPEG",
-            quality=quality, icc_profile=_SRGB_ICC, exif=_source_exif(src), optimize=True,
+            quality=quality, icc_profile=icc, exif=_source_exif(src, iptc), optimize=True,
         )
     elif fmt == "png":
-        im.save(out_path, "PNG", icc_profile=_SRGB_ICC)
+        im.save(out_path, "PNG", icc_profile=icc)
     else:  # tiff
-        im.save(out_path, "TIFF", icc_profile=_SRGB_ICC, compression="tiff_deflate")
+        im.save(
+            out_path, "TIFF",
+            icc_profile=icc, compression="tiff_deflate", exif=_source_exif(src, iptc),
+        )
     return out_path
 
 
