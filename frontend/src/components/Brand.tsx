@@ -23,7 +23,10 @@ export function Brand({ showFolder = true }: { showFolder?: boolean }) {
 
   return (
     <div className="flex items-center gap-2 leading-tight shrink-0">
-      <span className="font-bold text-lg">Viberoom</span>
+      <span className="flex items-center gap-1.5">
+        <img src="/favicon.png" alt="" className="w-5 h-5" />
+        <span className="font-brand font-bold text-lg tracking-tight">Viberoom</span>
+      </span>
       {showFolder && (
       <button
         className="flex items-center gap-1 text-xs opacity-70 hover:opacity-100 border-l border-base-content/20 pl-2"

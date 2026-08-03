@@ -1762,7 +1762,13 @@ def apply_preset(name: str, body: PresetApplyIn) -> dict:
 
 
 # serve built frontend if present (dev uses the Vite proxy instead)
-_frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+import sys
+
+if getattr(sys, "frozen", False):
+    # PyInstaller bundle (desktop app): dist is packaged next to the extracted files
+    _frontend_dist = Path(getattr(sys, "_MEIPASS", ".")) / "frontend" / "dist"
+else:
+    _frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 if _frontend_dist.is_dir():
 
     class SPAStaticFiles(StaticFiles):
@@ -1788,4 +1794,6 @@ def main() -> None:
     import uvicorn
 
     port = int(os.environ.get("VIBEROOM_PORT", "8423"))  # VIBE on a phone keypad
-    uvicorn.run("viberoom.main:app", host="127.0.0.1", port=port)
+    # pass the app object (not an import string): required under PyInstaller,
+    # equivalent otherwise since we don't use reload workers
+    uvicorn.run(app, host="127.0.0.1", port=port)
