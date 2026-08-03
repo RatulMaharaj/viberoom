@@ -197,6 +197,36 @@ export function gpuSupportsRecipe(recipe: any, ctx: SupportContext = {}): boolea
   return isDefault(prune(recipe, paths), prune(RECIPE_DEFAULTS, paths))
 }
 
+/**
+ * *Why* `gpuSupportsRecipe` said no: the dotted paths that are not at their
+ * default and not on the allowlist.
+ *
+ * Purely for messages. The preview can shrug and show the original, but an
+ * export has to refuse, and "this photo needs retouch, which only the desktop
+ * app renders" is a sentence a photographer can act on where "unsupported
+ * recipe" is not. Returns [] exactly when `gpuSupportsRecipe` returns true.
+ */
+export function gpuSupportGaps(recipe: any, ctx: SupportContext = {}): string[] {
+  if (!recipe || typeof recipe !== 'object') return ['recipe']
+  const paths = [...IMPLEMENTED]
+  const lut = recipe.color?.lut
+  if (lut && lutIsDrawable(lut, ctx)) paths.push(['color', 'lut'])
+  if (masksAreDrawable(recipe.masks)) paths.push(['masks'])
+  return gaps(prune(recipe, paths), prune(RECIPE_DEFAULTS, paths), [])
+}
+
+/** Descend while both sides are plain objects, so the answer is as specific as
+ *  the recipe allows — `detail.sharpening`, not `detail`. */
+function gaps(value: any, def: any, prefix: string[]): string[] {
+  if (isDefault(value, def)) return []
+  const here = prefix.join('.') || 'recipe'
+  const plain = (v: any) => typeof v === 'object' && v !== null && !Array.isArray(v)
+  if (!plain(value) || !plain(def)) return [here]
+  const out: string[] = []
+  for (const k of Object.keys(value)) out.push(...gaps(value[k], def[k], [...prefix, k]))
+  return out.length ? out : [here]
+}
+
 // ---- stage 4 -------------------------------------------------------------
 
 /** Every key `LocalAdjustments` has, and every key each mask type has on top

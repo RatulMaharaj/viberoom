@@ -55,6 +55,97 @@ async function checkOrientation(): Promise<[boolean | null, string]> {
   }
 }
 
+/** The export path, as far as it can be driven without a folder-picker gesture.
+ *
+ *  Writing files needs `showDirectoryPicker`, which needs a click and a folder,
+ *  so that half stays unverifiable here. Everything up to it does not: the
+ *  filename template, the PIL-compatible resize arithmetic, the memory cap, the
+ *  refusal rule, and — the expensive one — a genuine multi-megapixel GPU render
+ *  encoded to a JPEG. Returns rows plus the encoded frame to look at. */
+async function checkExport(): Promise<{ rows: Row[]; tile?: { label: string; url: string } }> {
+  const rows: Row[] = []
+  const add = (label: string, ok: boolean | null, detail: unknown) =>
+    rows.push({ label, ok, detail: String(detail) })
+  const {
+    EXPORT_PIXEL_CAP, cappedSize, exportRefusal, fitWithin, releaseExportRenderer, renderExport,
+    renderFilename,
+  } = await import('../local')
+
+  try {
+    const name = renderFilename('web/{seq}-{name}{ext}', {
+      name: 'DSC_0042', seq: 7, rating: 3, date: '2024-05-01', ext: '.jpg',
+    })
+    const dated = renderFilename('{date}/{rating}star/{name}{ext}', {
+      name: 'a', seq: 1, rating: 5, date: null, ext: '.png',
+    })
+    let refusedDots = false
+    try {
+      renderFilename('../{name}{ext}', { name: 'a', seq: 1, rating: 0, date: null, ext: '.jpg' })
+    } catch { refusedDots = true }
+    add('filename template', name === 'web/0007-DSC_0042.jpg' &&
+      dated === 'undated/5star/a.png' && refusedDots,
+      `${name} | ${dated} | '..' refused: ${refusedDots}`)
+  } catch (e) {
+    add('filename template', false, e)
+  }
+
+  // PIL's thumbnail() on 6000x4000 into a 2000 box gives 2000x1333, and never
+  // upscales. Both are things a resized export gets wrong quietly if wrong.
+  const fitted = fitWithin(6000, 4000, 2000)
+  const tall = fitWithin(1000, 3000, 2000)
+  const big = fitWithin(800, 600, 2000)
+  add('resize maths matches PIL',
+    fitted[0] === 2000 && fitted[1] === 1333 && tall[1] === 2000 && big[0] === 800,
+    `6000x4000→${fitted.join('x')}  1000x3000→${tall.join('x')}  800x600→${big.join('x')} (no upscale)`)
+
+  const capped = cappedSize(8192, 5464, 16384)
+  add('memory cap', capped[0] * capped[1] <= EXPORT_PIXEL_CAP,
+    `45 MP → ${capped.join('x')} (${(capped[0] * capped[1] / 1e6).toFixed(1)} MP), ` +
+    `cap ${(EXPORT_PIXEL_CAP / 1e6).toFixed(0)} MP; a bigger file is downscaled and the export says so`)
+
+  // The correctness rule: a recipe the shader cannot draw must be named and
+  // refused, not exported with the edit missing.
+  const refusedGrain = exportRefusal({ effects: { grain: { amount: 40, size: 25 } } })
+  const refusedMask = exportRefusal({ masks: [{ type: 'subject', adjustments: { exposure: 1 } }] })
+  const allowed = exportRefusal({ tone: { exposure: 0.5, contrast: 20 } })
+  add('refuses what it cannot draw', !!refusedGrain && !!refusedMask && allowed === null,
+    `grain: ${refusedGrain} | AI mask: ${refusedMask} | plain tone recipe: ${allowed ?? 'exported'}`)
+
+  // A real render at a size no preview ever asks for, through the same code an
+  // export uses. 6 MP rather than 24: this is a diagnostic, and the cap above
+  // is what the full-size case relies on anyway.
+  try {
+    const W = 3000, H = 2000
+    const data = new Float32Array(W * H * 3)
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 3
+        data[i] = x / W
+        data[i + 1] = y / H
+        data[i + 2] = 0.5
+      }
+    }
+    const t0 = performance.now()
+    const out = await renderExport(
+      { width: W, height: H, data },
+      { tone: { exposure: 0.3, contrast: 25 }, effects: { vignette: { amount: -40 } } },
+      { format: 'jpeg', quality: 90, maxDimension: 2000 },
+    )
+    const ms = Math.round(performance.now() - t0)
+    add('full-size render + JPEG encode',
+      out.width === 2000 && out.height === 1333 && out.blob.size > 0,
+      `${W}x${H} → ${out.width}x${out.height}, ${(out.blob.size / 1024).toFixed(0)} kB in ${ms} ms`)
+    return { rows, tile: { label: 'export render', url: URL.createObjectURL(out.blob) } }
+  } catch (e) {
+    add('full-size render + JPEG encode', false, e instanceof Error ? e.message : e)
+  } finally {
+    // Full-resolution render targets are hundreds of megabytes; a diagnostic
+    // must not leave them allocated.
+    releaseExportRenderer()
+  }
+  return { rows }
+}
+
 export function LocalCheck() {
   const [rows, setRows] = useState<Row[]>([])
   const [busy, setBusy] = useState(false)
@@ -70,6 +161,20 @@ export function LocalCheck() {
   async function timed<T>(work: () => Promise<T>): Promise<[T, number]> {
     const t0 = performance.now()
     return [await work(), Math.round(performance.now() - t0)]
+  }
+
+  /** The export checks on their own — no folder, no picker, one click. */
+  async function runExport() {
+    setRows([]); setTiles([]); setBusy(true)
+    try {
+      const { rows: r, tile } = await checkExport()
+      setRows(r)
+      if (tile) setTiles([tile])
+    } catch (e) {
+      push('failed', false, e instanceof Error ? `${e.name}: ${e.message}` : e)
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function run(pick: boolean) {
@@ -183,6 +288,13 @@ export function LocalCheck() {
       // and the untouched frame is what you are looking at.
       push('rendered a preview', preview.rendered === 'gpu',
            `${preview.rendered} in ${previewMs} ms`)
+
+      // Export, minus the one step that needs a folder: everything below runs
+      // the real code paths, and only `showDirectoryPicker` + `createWritable`
+      // are left for a human with a destination in mind.
+      const { rows: exportRows, tile } = await checkExport()
+      setRows((r) => [...r, ...exportRows])
+      if (tile) setTiles((x) => [...x, tile])
     } catch (e) {
       push('failed', false, e instanceof Error ? `${e.name}: ${e.message}` : e)
     } finally {
@@ -198,7 +310,10 @@ export function LocalCheck() {
           Runs the no-server path against a folder you choose: walk, sidecars, RAW and
           JPEG thumbnails, the EXIF backfill, and a GPU-rendered preview. Nothing is
           uploaded; the only write is a rating on the first photo's sidecar, set and
-          then put back.
+          then put back. “Check export” needs no folder at all: it runs the filename
+          template, the resize and memory arithmetic, the refusal rule, and a real
+          multi-megapixel render encoded to JPEG — everything an export does except
+          picking a destination and writing the file.
         </p>
       </div>
 
@@ -211,6 +326,9 @@ export function LocalCheck() {
             Reconnect last folder
           </button>
         )}
+        <button className="btn btn-sm" disabled={busy} onClick={runExport}>
+          Check export (no folder)
+        </button>
       </div>
 
       {rows.length > 0 && (

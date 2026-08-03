@@ -46,6 +46,59 @@ export interface PreviewOpts {
   original?: boolean
 }
 
+/** Everything the export dialog can ask for. A superset of what the browser
+ *  can do on purpose: the fields the local source cannot honour are disabled
+ *  in the UI rather than dropped silently here, so the two halves of "what did
+ *  I actually get" stay in one place. */
+export interface ExportSettings {
+  format: 'jpeg' | 'png' | 'tiff'
+  quality: number
+  bit_depth: 8 | 16
+  max_dimension: number | null
+  color_space: 'srgb' | 'display-p3' | 'adobe-rgb' | 'prophoto'
+  output_sharpen: 'screen' | 'matte' | 'glossy' | null
+  variant: string | null
+  /** Server only: a path typed or browsed to. Locally the destination is a
+   *  directory handle the user picked, which has no path we are allowed to
+   *  see. */
+  dest_dir: string | null
+  filename: string | null
+  watermark: {
+    text: string | null
+    image: string | null
+    position: string
+    opacity: number
+    scale: number
+  } | null
+}
+
+export interface ExportProgress {
+  /** 1-based, so it reads as "3 of 12" without arithmetic at the call site. */
+  index: number
+  total: number
+  filename: string
+  stage: 'render' | 'write' | 'done'
+}
+
+export interface ExportResult {
+  id: string
+  filename: string
+  ok: boolean
+  /** Where it landed, when it landed. */
+  path?: string
+  /** Why it did not, in a sentence meant for a person. */
+  error?: string
+  /** Something true but unasked-for — a frame the memory cap shrank. */
+  note?: string
+}
+
+export interface ExportReport {
+  written: number
+  results: ExportResult[]
+  /** Human name of where the files went. */
+  destination?: string
+}
+
 export interface PhotoSource {
   readonly kind: 'server' | 'local'
 
@@ -84,6 +137,28 @@ export interface PhotoSource {
    *  the source cannot hand out the file itself (the server never can). */
   getFile(id: string): Promise<File | null>
 
+  // ---------- export ----------
+
+  /** Write finished files. Sequential and progress-reporting because locally
+   *  it is a full-resolution GPU render plus an encode per photo — seconds
+   *  each — and a frozen dialog for a minute is not an acceptable answer.
+   *
+   *  Never throws for one bad photo: a batch reports per-image outcomes, so a
+   *  recipe the browser refuses does not lose the other thirty-nine. It does
+   *  throw when the whole export cannot start (no destination, no WebGL). */
+  exportImages(
+    ids: string[],
+    settings: ExportSettings,
+    onProgress?: (p: ExportProgress) => void,
+  ): Promise<ExportReport>
+
+  /** Ask for the export destination now, from a click. Local only: the browser
+   *  will not hand over a folder without a gesture, and the server takes a
+   *  path typed into the dialog instead. Returns null if the user cancels. */
+  chooseExportDestination?(): Promise<string | null>
+  /** The destination remembered for this session, if any. */
+  exportDestinationName?(): string | null
+
   /** Told when rows the source already returned have changed underneath —
    *  locally, that is EXIF arriving after the grid has painted. Absent on the
    *  server, which has read everything before it answers at all. */
@@ -120,6 +195,44 @@ export const ServerSource: PhotoSource = {
   preview: async (id, opts = {}) =>
     plain(api.previewUrl(id, opts.size ?? 1600, opts.bust ?? '', opts.original ?? false)),
   getFile: async () => null,
+
+  async exportImages(ids, s, onProgress) {
+    // The request body the dialog used to build itself. Unset fields are left
+    // off rather than sent as null: the endpoint applies an export preset
+    // underneath whatever the request sets explicitly, and a null would
+    // overwrite the preset's value with nothing.
+    const body: Record<string, any> = {
+      format: s.format,
+      quality: s.quality,
+      bit_depth: s.bit_depth,
+      color_space: s.color_space,
+    }
+    if (s.max_dimension) body.max_dimension = s.max_dimension
+    if (s.output_sharpen) body.output_sharpen = s.output_sharpen
+    if (s.variant) body.variant = s.variant
+    if (s.dest_dir) body.dest_dir = s.dest_dir
+    if (s.watermark && (s.watermark.text || s.watermark.image)) body.watermark = s.watermark
+
+    // The server renders the batch itself, so there is one round trip and no
+    // per-image progress to report — only that it started and finished.
+    onProgress?.({ index: 1, total: ids.length, filename: '', stage: 'render' })
+    if (ids.length > 1) {
+      if (s.filename) body.filename = s.filename
+      const r: any = await api.batchExport({ ...body, image_ids: ids })
+      const count = r.count ?? ids.length
+      return {
+        written: count,
+        results: ids.slice(0, count).map((id) => ({ id, filename: '', ok: true })),
+        destination: s.dest_dir ?? '<library>/exports',
+      }
+    }
+    const r = await api.exportImage(ids[0], body)
+    return {
+      written: 1,
+      results: [{ id: ids[0], filename: r.path, ok: true, path: r.path }],
+      destination: s.dest_dir ?? '<library>/exports',
+    }
+  },
 }
 
 /** Cached so the probe below runs once per page load, not once per caller. */

@@ -15,7 +15,7 @@ export type { LutData } from './lut'
 export { GpuRenderer, GpuUnavailable } from './renderer'
 export { fetchServerFrame, fetchSource } from './source'
 export type { ServerFrame, SourceFrame, SourceFormat } from './source'
-export { gpuSupportsRecipe } from './support'
+export { gpuSupportGaps, gpuSupportsRecipe } from './support'
 export type { SupportContext } from './support'
 export { buildUniforms } from './uniforms'
 export type {

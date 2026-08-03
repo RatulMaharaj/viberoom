@@ -252,9 +252,9 @@ export function Edit() {
           </button>
           <button
             className="btn btn-sm btn-primary"
-            title={local ? 'Export needs the desktop app' : undefined}
+            title={local ? 'Export — rendered here, written to a folder you pick' : undefined}
             onClick={() => setExportOpen(true)}
-            disabled={!id || local}
+            disabled={!id}
           >
             <Download size={14} /> Export…
           </button>
