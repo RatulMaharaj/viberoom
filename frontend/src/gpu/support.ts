@@ -81,8 +81,13 @@ export const RECIPE_DEFAULTS: Record<string, any> = {
   masks: [],
 }
 
-/** Everything the shader reproduces exactly. Masks, retouch and grain are
- *  later stages and are absent on purpose.
+/** Everything the shader reproduces exactly. Retouch and grain are later
+ *  stages and are absent on purpose.
+ *
+ *  `masks` is absent from this list for the same reason `color.lut` is: the
+ *  shader draws most of them and cannot draw all of them, so whether a recipe
+ *  qualifies depends on the mask objects themselves rather than on the field
+ *  existing — see `masksAreDrawable`.
  *
  *  `lens.defringe` is absent too, and permanently: it thresholds on
  *  `np.percentile(edge, 99)` taken over the entire frame. A fragment shader
@@ -185,9 +190,112 @@ export interface SupportContext {
  */
 export function gpuSupportsRecipe(recipe: any, ctx: SupportContext = {}): boolean {
   if (!recipe || typeof recipe !== 'object') return false
+  const paths = [...IMPLEMENTED]
   const lut = recipe.color?.lut
-  const paths = lut && lutIsDrawable(lut, ctx) ? [...IMPLEMENTED, ['color', 'lut']] : IMPLEMENTED
+  if (lut && lutIsDrawable(lut, ctx)) paths.push(['color', 'lut'])
+  if (masksAreDrawable(recipe.masks)) paths.push(['masks'])
   return isDefault(prune(recipe, paths), prune(RECIPE_DEFAULTS, paths))
+}
+
+// ---- stage 4 -------------------------------------------------------------
+
+/** Every key `LocalAdjustments` has, and every key each mask type has on top
+ *  of `MaskBase`. Spelled out rather than derived, because this is the check
+ *  that has to fail closed when the schema grows a field this build has never
+ *  heard of — the same rule `isDefault` follows for the rest of the recipe. */
+const LOCAL_ADJUSTMENT_KEYS = new Set([
+  'exposure', 'contrast', 'highlights', 'shadows', 'temp', 'tint',
+  'saturation', 'clarity', 'dehaze', 'sharpness',
+])
+
+const MASK_BASE_KEYS = ['type', 'name', 'invert', 'opacity', 'adjustments']
+
+const MASK_KEYS: Record<string, string[]> = {
+  linear: ['start', 'end'],
+  radial: ['center', 'radiusX', 'radiusY', 'feather'],
+  luminance: ['lumMin', 'lumMax', 'feather'],
+  color: ['hue', 'range'],
+  brush: ['strokes'],
+}
+
+const STROKE_KEYS = new Set(['points', 'radius', 'feather', 'flow', 'erase'])
+
+const isNum = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v)
+
+/** A [x, y] pair, as every mask coordinate in the schema is. */
+const isPoint = (v: any): boolean => Array.isArray(v) && v.length === 2 && v.every(isNum)
+
+/** Only keys in `allowed` are present, and nothing is undefined-but-listed. */
+const onlyKeys = (obj: any, allowed: Set<string>): boolean =>
+  typeof obj === 'object' && obj !== null && !Array.isArray(obj) &&
+  Object.keys(obj).every((k) => allowed.has(k))
+
+/**
+ * Can the shader draw every mask in this list?
+ *
+ * An allowlist per type, not a blocklist: a mask whose `type` this build does
+ * not recognize, or which carries a field it does not know how to draw, sends
+ * the whole recipe to the fallback. The two that will never pass:
+ *
+ *   - AI masks (`subject` / `background` / `sky`). `ops/ai_masks.py` runs
+ *     U2-Net when the ml extra is installed and a multi-stage saliency
+ *     heuristic when it is not — a segmentation network and a global
+ *     thresholding pass respectively. Neither is a fragment shader's kind of
+ *     work, and an *approximate* subject mask is exactly the failure this
+ *     module exists to prevent: it would put the right adjustment on the wrong
+ *     pixels, confidently.
+ *   - anything with `retouch` set, which is refused by `RECIPE_DEFAULTS`
+ *     rather than here, because retouch is not a mask.
+ */
+function masksAreDrawable(masks: any): boolean {
+  if (masks === undefined) return true
+  if (!Array.isArray(masks)) return false
+  return masks.every(maskIsDrawable)
+}
+
+function maskIsDrawable(mask: any): boolean {
+  if (typeof mask !== 'object' || mask === null || Array.isArray(mask)) return false
+  const extra = MASK_KEYS[mask.type]
+  if (!extra) return false // AI masks and anything newer than this build
+  if (!onlyKeys(mask, new Set([...MASK_BASE_KEYS, ...extra]))) return false
+  if (mask.name !== undefined && mask.name !== null && typeof mask.name !== 'string') return false
+  if (mask.invert !== undefined && typeof mask.invert !== 'boolean') return false
+  if (mask.opacity !== undefined && !isNum(mask.opacity)) return false
+  if (mask.adjustments !== undefined) {
+    const adj = mask.adjustments
+    if (!onlyKeys(adj, LOCAL_ADJUSTMENT_KEYS)) return false
+    if (!Object.values(adj).every(isNum)) return false
+  }
+  switch (mask.type) {
+    case 'linear':
+      return isPoint(mask.start) && isPoint(mask.end)
+    case 'radial':
+      return (
+        isPoint(mask.center) && isNum(mask.radiusX) && isNum(mask.radiusY) &&
+        mask.radiusX > 0 && mask.radiusY > 0 &&
+        (mask.feather === undefined || isNum(mask.feather))
+      )
+    case 'luminance':
+      return [mask.lumMin, mask.lumMax, mask.feather].every((v) => v === undefined || isNum(v))
+    case 'color':
+      // `range` divides in the weight, and the schema's `ge=5` keeps it away
+      // from zero; a recipe that got past the schema anyway must not.
+      return isNum(mask.hue) && isNum(mask.range) && mask.range > 0
+    case 'brush':
+      return Array.isArray(mask.strokes) && mask.strokes.length > 0 &&
+        mask.strokes.every(strokeIsDrawable)
+    default:
+      return false
+  }
+}
+
+function strokeIsDrawable(stroke: any): boolean {
+  if (!onlyKeys(stroke, STROKE_KEYS)) return false
+  if (!Array.isArray(stroke.points) || stroke.points.length === 0) return false
+  if (!stroke.points.every(isPoint)) return false
+  if (stroke.radius !== undefined && (!isNum(stroke.radius) || stroke.radius <= 0)) return false
+  if (stroke.erase !== undefined && typeof stroke.erase !== 'boolean') return false
+  return [stroke.feather, stroke.flow].every((v) => v === undefined || isNum(v))
 }
 
 /** A LUT the shader can draw: either one that does nothing, or one whose data

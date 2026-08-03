@@ -22,8 +22,11 @@
  *    - the LUT is the exception: it *is* pointwise, so it folds into the edit
  *      pass at one of two points (see `uLutStage`).
  *
- *  Masks, retouch and grain are later stages still; a recipe that uses any of
- *  them never reaches this shader (see support.ts).
+ *  Stage 4 — the local adjustments of `engine/ops/masks.py` — lives at the
+ *  bottom of this file, between geometry and the vignette, which is where
+ *  `render_float` runs it. Retouch and grain are still absent, and so are AI
+ *  masks; a recipe that uses any of them never reaches this shader (see
+ *  support.ts).
  *
  *  Every formula below is transcribed from the corresponding op rather than
  *  re-derived, including the parts that look redundant. Where the Python
@@ -585,6 +588,268 @@ void main() {
   vec3 c = texelFetch(uFrame, px, 0).rgb;
   vec3 high = c - texelFetch(uBlur, px, 0).rgb;
   fragColor = vec4(clamp(c + high * uStrength * 2.0, 0.0, 1.0), 1.0);
+}`
+
+// ---------------------------------------------------------------------------
+// Stage 4: local adjustments (engine/ops/masks.py).
+//
+// The Python is three things stacked: a weight map per mask, a sub-pipeline
+// (`_adjust`) run over the frame, and a per-pixel blend of the two. The GPU
+// mirrors all three, and deliberately does *not* mirror the fourth — the
+// bounding-box crop `apply_masks` does. That crop exists so the CPU can skip
+// pixels the blend would leave alone; a fragment shader gets that for free
+// because the blend at weight 0 already returns the untouched colour. What the
+// crop's own comment says about *radii*, though, is load-bearing here too:
+// clarity and dehaze size their blur from the frame they are handed, which is
+// why `_adjust_margin` refuses to crop for them at all. So every blur below is
+// sized from the full post-geometry frame, never from anything smaller.
+//
+// Masks run after geometry, so every coordinate here is normalized in the
+// *output* frame, and every pass in this section runs at the output size.
+// Row 0 is still the top, as everywhere before the present pass.
+// ---------------------------------------------------------------------------
+
+/** Which closed-form weight `MASK_WEIGHT_SOURCE` evaluates. Brush masks are
+ *  not here: they are rasterized stroke by stroke by `STROKE_SOURCE`. */
+export const MASK_LINEAR = 0
+export const MASK_RADIAL = 1
+export const MASK_LUMINANCE = 2
+export const MASK_COLOR = 3
+
+/** Points a single `STROKE_SOURCE` invocation can carry, packed two to a vec4.
+ *
+ *  A long stroke is split into chunks that share their boundary point, and the
+ *  distance is minimized across them in the target's green channel before the
+ *  last chunk composites. Splitting the *composite* instead would be wrong:
+ *  paint accumulates as `1 - (1-a)(1-b)`, so a stroke composited twice at
+ *  flow < 100 lands somewhere the Python never does. */
+export const MAX_STROKE_POINTS = 96
+
+/** `masks.py` `_smoothstep`, which is not GLSL's.
+ *
+ *  The difference is the `max(edge1 - edge0, 1e-6)`, and it is not cosmetic: a
+ *  radial mask with feather 0 has `inner == 1.0 == edge1`, where GLSL's
+ *  smoothstep divides by zero and the Python divides by 1e-6 — a hard edge,
+ *  not a NaN. */
+const SSTEP = `
+float sstep(float e0, float e1, float x) {
+  float t = clamp((x - e0) / max(e1 - e0, 1e-6), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}`
+
+/** `mask_weight`'s closed-form branches, into an RG32F target's red channel.
+ *
+ *  `invert` and `opacity` are *not* applied here — the blend pass does both,
+ *  so a brush mask (whose weight is built by a different program) needs no
+ *  second copy of them.
+ */
+export const MASK_WEIGHT_SOURCE = `#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D uFrame;
+uniform vec2 uResolution;
+uniform int  uMode;
+// linear:    uA = start.xy, end.xy
+// radial:    uA = center.xy, radiusX, radiusY;  uB.x = 1 - feather/100
+// luminance: uA = lumMin, lumMax, feather units; uB = lumMin<=0, lumMax>=100
+// color:     uA = hue degrees, range degrees
+uniform vec4 uA;
+uniform vec4 uB;
+out vec4 fragColor;
+const vec3 LUMA_W = vec3(${luma});
+${SSTEP}
+
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  // _coord_grids: pixel centers, x by width and y by height.
+  vec2 uv = gl_FragCoord.xy / uResolution;
+  float w = 0.0;
+
+  if (uMode == ${MASK_LINEAR}) {
+    vec2 d = uA.zw - uA.xy;
+    float norm = dot(d, d);
+    w = norm < 1e-9 ? 1.0 : 1.0 - sstep(0.0, 1.0, dot(uv - uA.xy, d) / norm);
+  } else if (uMode == ${MASK_RADIAL}) {
+    vec2 q = (uv - uA.xy) / uA.zw;
+    w = 1.0 - sstep(uB.x, 1.0, sqrt(dot(q, q)));
+  } else if (uMode == ${MASK_LUMINANCE}) {
+    vec3 c = clamp(texelFetch(uFrame, px, 0).rgb, 0.0, 1.0);
+    float lum = clamp(dot(c, LUMA_W), 0.0, 1.0) * 100.0;
+    // Both ends of the range are open: lumMin 0 selects every dark fully.
+    float lo = uB.x > 0.5 ? 1.0 : sstep(uA.x - uA.z, uA.x + uA.z, lum);
+    float hi = uB.y > 0.5 ? 0.0 : sstep(uA.y - uA.z, uA.y + uA.z, lum);
+    w = lo * (1.0 - hi);
+  } else {
+    vec3 x = clamp(texelFetch(uFrame, px, 0).rgb, 0.0, 1.0);
+    float maxc = max(max(x.r, x.g), x.b);
+    float minc = min(min(x.r, x.g), x.b);
+    float delta = maxc - minc;
+    float sat = maxc > 1e-6 ? delta / max(maxc, 1e-6) : 0.0;
+    // The hexagonal hue angle, exactly as np.arctan2 is called on it. GLSL
+    // leaves atan(0, 0) undefined where numpy returns 0, so grey is special
+    // cased rather than left to the driver.
+    float ny = sqrt(3.0) * (x.g - x.b);
+    float nx = 2.0 * x.r - x.g - x.b;
+    float hdeg = (ny == 0.0 && nx == 0.0) ? 0.0 : mod(degrees(atan(ny, nx)), 360.0);
+    float dist = abs(mod(hdeg - uA.x + 180.0, 360.0) - 180.0);
+    w = clamp(1.0 - dist / uA.y, 0.0, 1.0) * clamp(sat * 2.0, 0.0, 1.0);
+  }
+  fragColor = vec4(w, 0.0, 0.0, 1.0);
+}`
+
+/** One chunk of one brush stroke: `_stroke_patch` plus `_brush_weight`'s
+ *  composite, ping-ponged through an RG32F pair.
+ *
+ *  red carries the accumulated mask weight, green the running minimum distance
+ *  to the stroke's polyline. `uInit` starts a stroke's distance, `uFinal`
+ *  turns it into a patch and composites it — a stroke short enough to fit in
+ *  one chunk sets both.
+ *
+ *  Evaluating over the whole frame rather than `_stroke_patch`'s bounding box
+ *  is not an approximation: outside the box the smoothstep has already reached
+ *  1, so the patch is 0 there, and both composites leave the weight untouched
+ *  at 0.
+ */
+export const STROKE_SOURCE = `#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D uPrev;
+uniform vec4  uPts[${MAX_STROKE_POINTS / 2}];   // pixel coords, two points per vec4
+uniform int   uCount;      // points in this chunk
+uniform int   uInit;       // 1 = first chunk of this stroke
+uniform int   uFinal;      // 1 = last chunk: build the patch and composite
+uniform vec4  uStroke;     // hard radius, outer radius, flow/100, erase
+out vec4 fragColor;
+${SSTEP}
+
+vec2 point(int i) {
+  vec4 v = uPts[i >> 1];
+  return (i & 1) == 0 ? v.xy : v.zw;
+}
+
+void main() {
+  vec2 p = gl_FragCoord.xy;
+  vec2 prev = texelFetch(uPrev, ivec2(p), 0).rg;
+  float d = uInit == 1 ? 3.0e30 : prev.g;
+
+  if (uCount == 1) {
+    d = min(d, distance(p, point(0)));
+  } else {
+    for (int i = 0; i + 1 < uCount; i++) {
+      vec2 a = point(i);
+      vec2 v = point(i + 1) - a;
+      float norm = dot(v, v);
+      float seg;
+      if (norm < 1e-9) {
+        seg = distance(p, a);
+      } else {
+        float t = clamp(dot(p - a, v) / norm, 0.0, 1.0);
+        seg = distance(p, a + t * v);
+      }
+      d = min(d, seg);
+    }
+  }
+
+  float weight = prev.r;
+  if (uFinal == 1) {
+    float s = (1.0 - sstep(uStroke.x, uStroke.y, d)) * uStroke.z;
+    weight = uStroke.w > 0.5 ? weight * (1.0 - s) : 1.0 - (1.0 - weight) * (1.0 - s);
+  }
+  fragColor = vec4(weight, d, 0.0, 1.0);
+}`
+
+/** Which half of `_adjust`'s pointwise work `LOCAL_SOURCE` is doing. */
+export const LOCAL_TONE = 0
+export const LOCAL_SAT = 1
+
+/** The pointwise parts of `masks.py` `_adjust`.
+ *
+ *  Two modes rather than one pass, because saturation runs *after* dehaze and
+ *  clarity and those two are multi-pass. What is not split is where the
+ *  clamps fall: `_adjust` only clips at the points its ops clip, and one extra
+ *  `clamp(x, 0, 1)` between the gamma block and saturation would quietly
+ *  discard the headroom a lifted exposure leaves behind. So the tone pass
+ *  writes its result unclamped, and the blend pass applies `_adjust`'s closing
+ *  `np.clip(out, 0, 1)` instead.
+ */
+export const LOCAL_SOURCE = `#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D uSrc;
+uniform int   uMode;
+uniform float uToneOn;       // any of exposure/temp/tint/highlights/shadows
+uniform float uExpGain;      // 2^exposure
+uniform vec3  uWbGain;       // 2^(temp/100*0.35), 2^(-tint/100*0.25), 1/red
+uniform float uRegionsOn;
+uniform vec2  uRegions;      // highlights/100, shadows/100
+uniform float uContrastOn;
+uniform vec4  uContrast;     // k, lo, hi, t
+uniform float uContrastSign;
+uniform float uSatGain;      // 1 + saturation/100
+out vec4 fragColor;
+const vec3 LUMA_W = vec3(${luma});
+const float GAMMA = 2.2;
+
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  vec3 o = texelFetch(uSrc, px, 0).rgb;
+
+  if (uMode == ${LOCAL_SAT}) {
+    float gray = dot(o, LUMA_W);
+    fragColor = vec4(clamp(gray + (o - gray) * uSatGain, 0.0, 1.0), 1.0);
+    return;
+  }
+
+  // _adjust's opening np.clip(img, 0, 1).
+  o = clamp(o, 0.0, 1.0);
+  if (uToneOn > 0.5) {
+    vec3 lin = pow(o, vec3(GAMMA));
+    lin *= uExpGain;
+    lin *= uWbGain;
+    if (uRegionsOn > 0.5) {
+      // apply_regions with whites/blacks pinned at 0 — Tone(highlights=,
+      // shadows=) leaves the other two at their defaults, and both of their
+      // terms are exactly additive identities there.
+      float luma = clamp(dot(lin, LUMA_W), 0.0, 1.0);
+      float hi = uRegions.x;
+      lin = hi < 0.0
+        ? lin * (1.0 + hi * 0.6 * luma * luma)
+        : lin + hi * 0.4 * luma * luma * clamp(1.0 - lin, 0.0, 1.0);
+      lin += uRegions.y * 0.35 * pow(1.0 - luma, 3.0) * max(0.5 - lin, 0.0);
+      lin = max(lin, 0.0);
+    }
+    o = pow(max(lin, 0.0), vec3(1.0 / GAMMA));
+  }
+
+  if (uContrastOn > 0.5) {
+    vec3 x = clamp(o, 0.0, 1.0);
+    vec3 sig = 1.0 / (1.0 + exp(-uContrast.x * 4.0 * (x - 0.5)));
+    sig = (sig - uContrast.y) / (uContrast.z - uContrast.y);
+    vec3 alt = uContrastSign > 0.0 ? sig : x + (x - sig);
+    o = x * (1.0 - uContrast.w) + alt * uContrast.w;
+  }
+
+  fragColor = vec4(o, 1.0);
+}`
+
+/** `apply_masks`'s blend, and the two clips that bracket it: the frame's own
+ *  `np.clip(img, 0, 1)` and `_adjust`'s closing clip on the adjusted copy. */
+export const MASK_BLEND_SOURCE = `#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D uFrame;
+uniform sampler2D uAdjusted;
+uniform sampler2D uWeight;
+uniform float uInvert;
+uniform float uOpacity;    // opacity / 100
+out vec4 fragColor;
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  vec3 base = clamp(texelFetch(uFrame, px, 0).rgb, 0.0, 1.0);
+  vec3 adj = clamp(texelFetch(uAdjusted, px, 0).rgb, 0.0, 1.0);
+  float raw = texelFetch(uWeight, px, 0).r;
+  float w = (uInvert > 0.5 ? 1.0 - raw : raw) * uOpacity;
+  fragColor = vec4(base * (1.0 - w) + adj * w, 1.0);
 }`
 
 /** Copies the float intermediate out to the 8-bit canvas. */

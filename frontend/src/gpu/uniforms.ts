@@ -10,6 +10,11 @@
 import {
   CURVE_SIZE,
   CURVE_ROWS,
+  MASK_COLOR,
+  MASK_LINEAR,
+  MASK_LUMINANCE,
+  MASK_RADIAL,
+  MAX_STROKE_POINTS,
   PRESENCE_CLARITY,
   PRESENCE_DEHAZE,
   PRESENCE_TEXTURE,
@@ -108,6 +113,63 @@ export interface LutUniforms {
   stage: 0 | 1
 }
 
+// ---- stage 4: local adjustments (engine/ops/masks.py) ---------------------
+
+/** One `STROKE_SOURCE` invocation. A stroke longer than `MAX_STROKE_POINTS`
+ *  becomes several, sharing their boundary point; only the last composites. */
+export interface StrokeChunk {
+  /** Pixel coordinates, packed two points per vec4 for the uniform array. */
+  pts: Float32Array
+  count: number
+  init: boolean
+  final: boolean
+}
+
+/** `_stroke_patch` for one stroke, already reduced to what the shader needs. */
+export interface StrokePass {
+  chunks: StrokeChunk[]
+  /** hard radius, outer radius, flow/100, erase. */
+  shape: [number, number, number, number]
+}
+
+export interface MaskWeightUniforms {
+  /** MASK_* from shader.ts, or null for a brush mask. */
+  mode: number | null
+  /** Mode-specific; see the uniform block in `MASK_WEIGHT_SOURCE`. */
+  a: [number, number, number, number]
+  b: [number, number, number, number]
+  strokes: StrokePass[]
+}
+
+/** `masks.py` `_adjust`, as the passes that reproduce it. */
+export interface LocalAdjustUniforms {
+  /** True when the gamma-linearized block or the contrast runs at all. */
+  toneOn: boolean
+  gammaOn: number
+  expGain: number
+  wbGain: [number, number, number]
+  regionsOn: number
+  regions: [number, number]
+  contrastOn: number
+  contrast: [number, number, number, number]
+  contrastSign: number
+  /** Both use the *frame's* short edge for their radius, which is the whole
+   *  reason `_adjust_margin` refuses to crop for them. */
+  dehaze: PresencePass | null
+  clarity: PresencePass | null
+  /** 1 + saturation/100, or null when the slider is at zero. */
+  satGain: number | null
+  /** `fast_blur` radius and the unsharp strength, or null. */
+  sharpen: { radius: number; strength: number } | null
+}
+
+export interface MaskUniforms {
+  weight: MaskWeightUniforms
+  adjust: LocalAdjustUniforms
+  invert: number
+  opacity: number
+}
+
 export interface Uniforms {
   lens: LensUniforms | null
   geometry: GeometryUniforms | null
@@ -133,6 +195,9 @@ export interface Uniforms {
    *  without one, and guessing them would draw the wrong blur. */
   presence: PresencePass[]
   detail: DetailUniforms | null
+  /** In recipe order. Empty unless a `FrameInfo` was supplied: mask radii and
+   *  stroke geometry are all sized from the *post-geometry* frame. */
+  masks: MaskUniforms[]
 }
 
 const num = (v: unknown, fallback: number): number =>
@@ -410,6 +475,187 @@ function buildLut(lut: any, available: { kind: '1D' | '3D'; size: number } | nul
   }
 }
 
+/** The ten sliders `LocalAdjustments` holds, in schema order. */
+const LOCAL_SLIDERS = [
+  'exposure', 'contrast', 'highlights', 'shadows', 'temp', 'tint',
+  'saturation', 'clarity', 'dehaze', 'sharpness',
+] as const
+
+/** `masks.py` `_stroke_patch`, minus the bounding box the GPU does not need.
+ *
+ *  Points are converted to pixels here, in float64, exactly as the Python's
+ *  `[(x * w, y * h) for x, y in stroke.points]` does before the float32 grid
+ *  math starts.
+ */
+function buildStroke(stroke: any, w: number, h: number): StrokePass | null {
+  const pts = Array.isArray(stroke?.points) ? stroke.points : []
+  if (pts.length === 0) return null
+  const rPx = num(stroke.radius, 0.05) * Math.min(h, w)
+  const hard = rPx * (1 - num(stroke.feather, 50) / 100)
+  const px: number[] = []
+  for (const p of pts) {
+    px.push(num(p?.[0], 0) * w, num(p?.[1], 0) * h)
+  }
+
+  const chunks: StrokeChunk[] = []
+  const n = pts.length
+  if (n === 1) {
+    chunks.push({ pts: pack(px, 0, 1), count: 1, init: true, final: true })
+  } else {
+    // Chunks share their boundary point so no segment is dropped between them.
+    for (let start = 0; start < n - 1; start += MAX_STROKE_POINTS - 1) {
+      const count = Math.min(MAX_STROKE_POINTS, n - start)
+      chunks.push({
+        pts: pack(px, start, count),
+        count,
+        init: start === 0,
+        final: start + count >= n,
+      })
+    }
+  }
+  return {
+    chunks,
+    shape: [hard, Math.max(rPx, hard + 0.5), num(stroke.flow, 100) / 100, stroke.erase === true ? 1 : 0],
+  }
+}
+
+/** `count` points from `px` (a flat x,y list) as vec4s, two points each. */
+function pack(px: number[], start: number, count: number): Float32Array {
+  const out = new Float32Array(MAX_STROKE_POINTS * 2)
+  out.set(px.slice(start * 2, (start + count) * 2))
+  return out
+}
+
+/** `mask_weight`, split into the closed-form uniforms and the stroke list. */
+function buildMaskWeight(mask: any, w: number, h: number): MaskWeightUniforms | null {
+  const zero: [number, number, number, number] = [0, 0, 0, 0]
+  const out = (mode: number, a: number[], b: number[] = []): MaskWeightUniforms => ({
+    mode,
+    a: [a[0] ?? 0, a[1] ?? 0, a[2] ?? 0, a[3] ?? 0],
+    b: [b[0] ?? 0, b[1] ?? 0, b[2] ?? 0, b[3] ?? 0],
+    strokes: [],
+  })
+  switch (mask?.type) {
+    case 'linear':
+      return out(MASK_LINEAR, [
+        num(mask.start?.[0], 0), num(mask.start?.[1], 0),
+        num(mask.end?.[0], 0), num(mask.end?.[1], 0),
+      ])
+    case 'radial': {
+      const rx = num(mask.radiusX, 0)
+      const ry = num(mask.radiusY, 0)
+      if (rx <= 0 || ry <= 0) return null
+      return out(
+        MASK_RADIAL,
+        [num(mask.center?.[0], 0), num(mask.center?.[1], 0), rx, ry],
+        [1 - num(mask.feather, 50) / 100],
+      )
+    }
+    case 'luminance': {
+      const lumMin = num(mask.lumMin, 0)
+      const lumMax = num(mask.lumMax, 100)
+      return out(
+        MASK_LUMINANCE,
+        [lumMin, lumMax, Math.max((num(mask.feather, 25) / 100) * 20, 0.5), 0],
+        [lumMin <= 0 ? 1 : 0, lumMax >= 100 ? 1 : 0],
+      )
+    }
+    case 'color': {
+      const range = num(mask.range, 30)
+      if (range === 0) return null
+      return out(MASK_COLOR, [num(mask.hue, 0), range])
+    }
+    case 'brush': {
+      const strokes = (Array.isArray(mask.strokes) ? mask.strokes : [])
+        .map((s: any) => buildStroke(s, w, h))
+        .filter((s: StrokePass | null): s is StrokePass => s !== null)
+      if (strokes.length === 0) return null
+      return { mode: null, a: zero, b: zero, strokes }
+    }
+    default:
+      // 'subject' / 'background' / 'sky' land here. support.ts refuses them
+      // outright; this is the second line of defence, not the first.
+      return null
+  }
+}
+
+/** `masks.py` `_adjust`, sized from the frame masks actually run on. */
+function buildLocalAdjust(adj: any, w: number, h: number): LocalAdjustUniforms | null {
+  const v = (k: string): number => num(adj?.[k], 0)
+  if (!LOCAL_SLIDERS.some((k) => v(k) !== 0)) return null
+  const short = Math.min(h, w)
+
+  const exposure = v('exposure')
+  const temp = v('temp')
+  const tint = v('tint')
+  const highlights = v('highlights')
+  const shadows = v('shadows')
+  const gammaOn = exposure || temp || tint || highlights || shadows ? 1 : 0
+  const rg = 2 ** ((temp / 100) * 0.35)
+  const gg = 2 ** ((-tint / 100) * 0.25)
+
+  const contrast = v('contrast')
+  const k = 1 + (Math.abs(contrast) / 100) * 1.5
+  const sharpness = v('sharpness')
+  const saturation = v('saturation')
+  const dehaze = v('dehaze')
+  const clarity = v('clarity')
+
+  return {
+    toneOn: gammaOn === 1 || contrast !== 0,
+    gammaOn,
+    // The Python multiplies by 2**exposure and by the gains as two separate
+    // steps; both are exactly 1.0 when their slider is at zero, so folding
+    // them would change nothing — but the order they compose in would.
+    expGain: 2 ** exposure,
+    wbGain: temp || tint ? [rg, gg, 1 / rg] : [1, 1, 1],
+    regionsOn: highlights || shadows ? 1 : 0,
+    regions: [highlights / 100, shadows / 100],
+    contrastOn: contrast !== 0 ? 1 : 0,
+    contrast: [k, 1 / (1 + Math.exp(k * 2)), 1 / (1 + Math.exp(-k * 2)), Math.abs(contrast) / 100],
+    contrastSign: contrast > 0 ? 1 : -1,
+    dehaze: dehaze
+      ? { mode: PRESENCE_DEHAZE, amount: dehaze / 100, radius: boxRadius(Math.max(4.0, short * 0.02)) }
+      : null,
+    clarity: clarity
+      ? { mode: PRESENCE_CLARITY, amount: clarity / 100, radius: boxRadius(Math.max(2.0, short * 0.015)) }
+      : null,
+    satGain: saturation ? 1 + saturation / 100 : null,
+    sharpen: sharpness
+      // SHARPEN_SOURCE doubles its strength (`apply_detail`'s convention), so
+      // the *1.5 the Python asks for is passed as 0.75.
+      ? { radius: boxRadius(Math.max(1.0, short / 1500)), strength: (sharpness / 100) * 0.75 }
+      : null,
+  }
+}
+
+/** `apply_masks`, in recipe order.
+ *
+ *  `w`/`h` are the *post-geometry* frame, because that is what `render_float`
+ *  hands `apply_masks` and every radius and stroke radius here is measured
+ *  from it.
+ *
+ *  One thing the Python does that this cannot: `apply_masks` skips a mask
+ *  whose weight never exceeds 1e-4, which needs a reduction over the frame.
+ *  The shader blends it instead, and the two differ by at most 1e-4 of the
+ *  adjustment — a fortieth of an 8-bit step, and always in the direction the
+ *  mask was already pointing.
+ */
+function buildMasks(masks: any, w: number, h: number): MaskUniforms[] {
+  if (!Array.isArray(masks)) return []
+  const out: MaskUniforms[] = []
+  for (const mask of masks) {
+    const opacity = num(mask?.opacity, 100)
+    if (opacity === 0) continue
+    const adjust = buildLocalAdjust(mask?.adjustments, w, h)
+    if (!adjust) continue
+    const weight = buildMaskWeight(mask, w, h)
+    if (!weight) continue
+    out.push({ weight, adjust, invert: mask?.invert === true ? 1 : 0, opacity: opacity / 100 })
+  }
+  return out
+}
+
 export function buildUniforms(
   recipe: any,
   frame?: FrameInfo,
@@ -484,11 +730,16 @@ export function buildUniforms(
 
   const vigAmount = num(vig.amount, 0)
 
+  // Geometry decides the size of everything after it, so like the presence
+  // and detail radii it cannot be planned without knowing the frame.
+  const geometry = frame ? buildGeometry(recipe?.geometry, frame) : null
+  // Masks run after geometry, so they measure themselves against *its* output.
+  const maskW = geometry?.width ?? frame?.width ?? 0
+  const maskH = geometry?.height ?? frame?.height ?? 0
+
   return {
     lens: buildLens(recipe?.lens),
-    // Geometry decides the size of everything after it, so like the presence
-    // and detail radii it cannot be planned without knowing the frame.
-    geometry: frame ? buildGeometry(recipe?.geometry, frame) : null,
+    geometry,
     lut: buildLut(color.lut, lut),
     wbGain: [wbR, wbG, wbB],
     exposure: num(tone.exposure, 0),
@@ -519,5 +770,6 @@ export function buildUniforms(
     ],
     presence: frame ? buildPresence(tone, frame) : [],
     detail: frame ? buildDetail(recipe?.detail, frame) : null,
+    masks: frame ? buildMasks(recipe?.masks, maskW, maskH) : [],
   }
 }

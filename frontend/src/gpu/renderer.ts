@@ -13,6 +13,11 @@ import {
   GAUSS_SOURCE,
   GEOM_SOURCE,
   LENS_SOURCE,
+  LOCAL_SAT,
+  LOCAL_SOURCE,
+  LOCAL_TONE,
+  MASK_BLEND_SOURCE,
+  MASK_WEIGHT_SOURCE,
   NR_SOURCE,
   PLANE_CHROMA,
   PLANE_DARK,
@@ -23,11 +28,19 @@ import {
   PRESENCE_SOURCE,
   PRESENT_SOURCE,
   SHARPEN_SOURCE,
+  STROKE_SOURCE,
   VERTEX_SOURCE,
   VIGNETTE_SOURCE,
 } from './shader'
 import { buildUniforms } from './uniforms'
-import type { GaussPass, GeomPass, LensUniforms, PresencePass } from './uniforms'
+import type {
+  GaussPass,
+  GeomPass,
+  LensUniforms,
+  LocalAdjustUniforms,
+  MaskUniforms,
+  PresencePass,
+} from './uniforms'
 import type { LutData } from './lut'
 import type { SourceFrame } from './source'
 
@@ -92,6 +105,15 @@ const PASS_UNIFORMS: Record<string, string[]> = {
   nr: ['uLuma', 'uChroma'],
   sharpen: ['uFrame', 'uBlur', 'uStrength'],
   vignette: ['uFrame', 'uResolution', 'uVignette'],
+  maskweight: ['uFrame', 'uResolution', 'uMode', 'uA', 'uB'],
+  // `uPts[0]` rather than `uPts`: the spec only guarantees a location for the
+  // first element, and uniform4fv fills the rest of the array from there.
+  stroke: ['uPrev', 'uPts[0]', 'uCount', 'uInit', 'uFinal', 'uStroke'],
+  local: [
+    'uSrc', 'uMode', 'uToneOn', 'uExpGain', 'uWbGain', 'uRegionsOn', 'uRegions',
+    'uContrastOn', 'uContrast', 'uContrastSign', 'uSatGain',
+  ],
+  blend: ['uFrame', 'uAdjusted', 'uWeight', 'uInvert', 'uOpacity'],
   present: ['uFrame'],
 }
 
@@ -105,6 +127,10 @@ const PASS_SOURCES: Record<string, string> = {
   nr: NR_SOURCE,
   sharpen: SHARPEN_SOURCE,
   vignette: VIGNETTE_SOURCE,
+  maskweight: MASK_WEIGHT_SOURCE,
+  stroke: STROKE_SOURCE,
+  local: LOCAL_SOURCE,
+  blend: MASK_BLEND_SOURCE,
   present: PRESENT_SOURCE,
 }
 
@@ -138,6 +164,16 @@ export class GpuRenderer {
   /** Ping-pong pair at the *geometry output* size, allocated only when a
    *  recipe actually changes the frame's shape. */
   private geoFrames: Target[] = []
+  /** Stage 4's working set, at the *post-geometry* size and allocated only
+   *  when a recipe actually has a mask on it: two to ping-pong the running
+   *  frame through, two for `_adjust`'s sub-pipeline, two for its blurs. */
+  private maskFrames: Target[] = []
+  /** The weight map, ping-ponged because a brush stroke composites on top of
+   *  what earlier strokes left. RG32F, not RGBA16F: `_brush_weight` and every
+   *  closed-form mask are float32 in the engine, and half precision would put
+   *  a visible step in a wide gradient's falloff. Red is the weight, green the
+   *  running distance a multi-chunk stroke minimizes over. */
+  private maskWeights: Target[] = []
   private lut: { tex3: WebGLTexture | null; tex1: WebGLTexture | null; kind: '1D' | '3D'; size: number } | null = null
   private width = 0
   private height = 0
@@ -267,9 +303,12 @@ export class GpuRenderer {
     return this.lut ? { kind: this.lut.kind, size: this.lut.size } : null
   }
 
-  /** Allocates one RGBA16F target, at the source size unless told otherwise. */
-  private makeTarget(width = this.width, height = this.height): Target {
+  /** Allocates one float target, at the source size and RGBA16F unless told
+   *  otherwise. `EXT_color_buffer_float` makes RG32F renderable too, which is
+   *  what the mask weight maps use. */
+  private makeTarget(width = this.width, height = this.height, format?: number): Target {
     const gl = this.gl
+    const internal = format ?? gl.RGBA16F
     const tex = gl.createTexture()
     if (!tex) throw new GpuUnavailable('could not create render target')
     gl.bindTexture(gl.TEXTURE_2D, tex)
@@ -279,7 +318,7 @@ export class GpuRenderer {
     for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) {
       gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE)
     }
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA16F, width, height)
+    gl.texStorage2D(gl.TEXTURE_2D, 1, internal, width, height)
     const fbo = gl.createFramebuffer()
     if (!fbo) throw new GpuUnavailable('could not create framebuffer')
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
@@ -316,6 +355,23 @@ export class GpuRenderer {
       this.geoFrames = [this.makeTarget(w, h), this.makeTarget(w, h)]
     }
     return this.geoFrames
+  }
+
+  /** Stage 4's pools, sized like `geoScratch` and grown rather than
+   *  reallocated: a mask being dragged redraws on every pointer move. */
+  private maskScratch(width: number, height: number): { frames: Target[]; weights: Target[] } {
+    const [a] = this.maskFrames
+    if (!a || a.width < width || a.height < height) {
+      this.release(this.maskFrames)
+      this.release(this.maskWeights)
+      const w = Math.max(width, a?.width ?? 0)
+      const h = Math.max(height, a?.height ?? 0)
+      for (let i = 0; i < 6; i++) this.maskFrames.push(this.makeTarget(w, h))
+      for (let i = 0; i < 2; i++) {
+        this.maskWeights.push(this.makeTarget(w, h, this.gl.RG32F))
+      }
+    }
+    return { frames: this.maskFrames, weights: this.maskWeights }
   }
 
   private release(targets: Target[]): void {
@@ -395,44 +451,54 @@ export class GpuRenderer {
       this.release(this.frames)
       this.release(this.aux)
       this.release(this.geoFrames)
+      this.release(this.maskFrames)
+      this.release(this.maskWeights)
       this.frames = [this.makeTarget(), this.makeTarget()]
     }
   }
 
-  /** Extracts a plane from `src` into `dst`. */
-  private planePass(mode: number, src: Target, dst: Target): void {
-    const l = this.begin('plane', dst)
+  /** Extracts a plane from `src` into `dst`, at `size` (the frame's size, which
+   *  after geometry is no longer the target's). */
+  private planePass(mode: number, src: Target, dst: Target, size: [number, number]): void {
+    const l = this.begin('plane', dst, size)
     this.bind(0, src.tex, l.uFrame)
     this.gl.uniform1i(l.uPlaneMode, mode)
     this.draw()
   }
 
   /**
-   * `fast_blur` in place over two scratch targets: three box passes per axis,
-   * alternating y, x, y, x, y, x as the Python's `i % 2` does.
+   * `fast_blur`: three box passes per axis, alternating y, x, y, x, y, x as the
+   * Python's `i % 2` does.
    *
-   * Returns whichever of `a`/`b` the result landed in. A pass that the Python
-   * would have short-circuited — a degenerate axis, or a radius the axis is too
-   * short to hold — is skipped rather than run with a clamped radius, so the
-   * two agree on which buffer the answer is in as well as what it contains.
+   * Reads `src` and ping-pongs between `a` and `b`, so `src` survives — stage
+   * 4's sharpness needs the unblurred frame back at the end, and passing
+   * `src === a` would have overwritten it on the second pass.
+   *
+   * Returns whichever target the result landed in. A pass the Python would
+   * have short-circuited — a degenerate axis, or a radius the axis is too short
+   * to hold — is skipped rather than run with a clamped radius, so the two
+   * agree on which buffer the answer is in as well as what it contains.
    */
-  private fastBlur(radius: number, a: Target, b: Target): Target {
-    let src = a
-    let dst = b
+  private fastBlur(
+    radius: number, src: Target, a: Target, b: Target, w: number, h: number,
+  ): Target {
+    let from = src
+    let to = a
     for (let i = 0; i < 6; i++) {
       const alongY = i % 2 === 0
-      const n = alongY ? this.height : this.width
+      const n = alongY ? h : w
       const r = Math.min(radius, n - 1)
       if (r <= 0 || n <= 1) continue
-      const l = this.begin('box', dst)
-      this.bind(0, src.tex, l.uSrc)
-      this.gl.uniform2i(l.uSize, this.width, this.height)
+      const l = this.begin('box', to, [w, h])
+      this.bind(0, from.tex, l.uSrc)
+      this.gl.uniform2i(l.uSize, w, h)
       this.gl.uniform2i(l.uStep, alongY ? 0 : 1, alongY ? 1 : 0)
       this.gl.uniform1i(l.uRadius, r)
       this.draw()
-      ;[src, dst] = [dst, src]
+      from = to
+      to = to === a ? b : a
     }
-    return src
+    return from
   }
 
   /** `detail._blur`: a separable gaussian, y then x, `src` -> `a` -> `b`.
@@ -455,12 +521,16 @@ export class GpuRenderer {
     return from
   }
 
-  /** One presence op: build its plane, blur it, fold it back in. */
-  private presencePass(p: PresencePass, from: Target, to: Target): void {
-    const [s0, s1] = this.scratch(2)
-    this.planePass(p.mode === PRESENCE_DEHAZE ? PLANE_DARK : PLANE_LUMA, from, s0)
-    const blurred = this.fastBlur(p.radius, s0, s1)
-    const l = this.begin('presence', to)
+  /** One presence op: build its plane, blur it, fold it back in.
+   *
+   *  The scratch pair is a parameter because stage 4 runs the same op after
+   *  geometry, where the renderer's own scratch is the wrong size. */
+  private presencePass(
+    p: PresencePass, from: Target, to: Target, w: number, h: number, s0: Target, s1: Target,
+  ): void {
+    this.planePass(p.mode === PRESENCE_DEHAZE ? PLANE_DARK : PLANE_LUMA, from, s0, [w, h])
+    const blurred = this.fastBlur(p.radius, s0, s1, s0, w, h)
+    const l = this.begin('presence', to, [w, h])
     this.bind(0, from.tex, l.uFrame)
     this.bind(1, blurred.tex, l.uPlane)
     this.gl.uniform1i(l.uMode, p.mode)
@@ -505,6 +575,148 @@ export class GpuRenderer {
     gl.uniformMatrix3fv(loc.uMap, false, [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]])
     gl.uniform1i(loc.uResample, p.resample ? 1 : 0)
     this.draw()
+  }
+
+  /** `mask_weight` for one mask, into one of the two RG32F weight targets.
+   *
+   *  Returns whichever it landed in. `invert` and `opacity` are left to the
+   *  blend, which is the one place both kinds of mask meet. */
+  private weightPass(
+    m: MaskUniforms, frame: Target, w0: Target, w1: Target, w: number, h: number,
+  ): Target {
+    const gl = this.gl
+    if (m.weight.mode !== null) {
+      const l = this.begin('maskweight', w0, [w, h])
+      this.bind(0, frame.tex, l.uFrame)
+      gl.uniform2f(l.uResolution, w, h)
+      gl.uniform1i(l.uMode, m.weight.mode)
+      gl.uniform4fv(l.uA, m.weight.a)
+      gl.uniform4fv(l.uB, m.weight.b)
+      this.draw()
+      return w0
+    }
+
+    // `_brush_weight` starts from np.zeros and each stroke composites onto
+    // what the previous ones left, so the buffer has to be cleared and then
+    // ping-ponged — a stroke cannot read the target it is writing.
+    let src = w0
+    let dst = w1
+    gl.bindFramebuffer(gl.FRAMEBUFFER, src.fbo)
+    gl.viewport(0, 0, w, h)
+    gl.clearColor(0, 0, 0, 1)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+    for (const stroke of m.weight.strokes) {
+      for (const chunk of stroke.chunks) {
+        const l = this.begin('stroke', dst, [w, h])
+        this.bind(0, src.tex, l.uPrev)
+        gl.uniform4fv(l['uPts[0]'], chunk.pts)
+        gl.uniform1i(l.uCount, chunk.count)
+        gl.uniform1i(l.uInit, chunk.init ? 1 : 0)
+        gl.uniform1i(l.uFinal, chunk.final ? 1 : 0)
+        gl.uniform4fv(l.uStroke, stroke.shape)
+        this.draw()
+        ;[src, dst] = [dst, src]
+      }
+    }
+    return src
+  }
+
+  /** One `LOCAL_SOURCE` invocation. */
+  private localPass(
+    mode: number, a: LocalAdjustUniforms, src: Target, dst: Target, w: number, h: number,
+  ): void {
+    const gl = this.gl
+    const l = this.begin('local', dst, [w, h])
+    this.bind(0, src.tex, l.uSrc)
+    gl.uniform1i(l.uMode, mode)
+    gl.uniform1f(l.uToneOn, a.gammaOn)
+    gl.uniform1f(l.uExpGain, a.expGain)
+    gl.uniform3fv(l.uWbGain, a.wbGain)
+    gl.uniform1f(l.uRegionsOn, a.regionsOn)
+    gl.uniform2fv(l.uRegions, a.regions)
+    gl.uniform1f(l.uContrastOn, a.contrastOn)
+    gl.uniform4fv(l.uContrast, a.contrast)
+    gl.uniform1f(l.uContrastSign, a.contrastSign)
+    gl.uniform1f(l.uSatGain, a.satGain ?? 1)
+    this.draw()
+  }
+
+  /** `masks.py` `_adjust`, in its order: the gamma-linearized block and
+   *  contrast, then dehaze, clarity, saturation, sharpness.
+   *
+   *  `p0`/`p1` ping-pong the result and `s0`/`s1` are the blurs' scratch.
+   *  Returns the target holding the adjusted frame — which is `frame` itself
+   *  only if the caller handed in an adjustment that does nothing, and
+   *  `buildMasks` drops those before they get here. */
+  private adjustPasses(
+    a: LocalAdjustUniforms, frame: Target,
+    p0: Target, p1: Target, s0: Target, s1: Target,
+    w: number, h: number,
+  ): Target {
+    const gl = this.gl
+    let src = frame
+    let slot = 0
+    const next = (): Target => {
+      const dst = slot === 0 ? p0 : p1
+      slot = 1 - slot
+      return dst
+    }
+
+    if (a.toneOn) {
+      const dst = next()
+      this.localPass(LOCAL_TONE, a, src, dst, w, h)
+      src = dst
+    }
+    for (const p of [a.dehaze, a.clarity]) {
+      if (!p) continue
+      const dst = next()
+      this.presencePass(p, src, dst, w, h, s0, s1)
+      src = dst
+    }
+    if (a.satGain !== null) {
+      const dst = next()
+      this.localPass(LOCAL_SAT, a, src, dst, w, h)
+      src = dst
+    }
+    if (a.sharpen) {
+      const blurred = this.fastBlur(a.sharpen.radius, src, s0, s1, w, h)
+      const dst = next()
+      const l = this.begin('sharpen', dst, [w, h])
+      this.bind(0, src.tex, l.uFrame)
+      this.bind(1, blurred.tex, l.uBlur)
+      gl.uniform1f(l.uStrength, a.sharpen.strength)
+      this.draw()
+      src = dst
+    }
+    return src
+  }
+
+  /** `apply_masks`: weight, adjust, blend, once per mask, in recipe order.
+   *
+   *  Each mask reads the frame the previous ones left — a luminance or colour
+   *  range mask genuinely selects on the running frame, not the original — so
+   *  the whole loop is sequential and the frame ping-pongs through two of the
+   *  pool's targets. */
+  private maskStage(masks: MaskUniforms[], frame: Target, w: number, h: number): Target {
+    const gl = this.gl
+    const { frames, weights } = this.maskScratch(w, h)
+    const [f0, f1, p0, p1, s0, s1] = frames
+    const [w0, w1] = weights
+    let cur = frame
+    for (const m of masks) {
+      const weight = this.weightPass(m, cur, w0, w1, w, h)
+      const adjusted = this.adjustPasses(m.adjust, cur, p0, p1, s0, s1, w, h)
+      const dst = cur === f0 ? f1 : f0
+      const l = this.begin('blend', dst, [w, h])
+      this.bind(0, cur.tex, l.uFrame)
+      this.bind(1, adjusted.tex, l.uAdjusted)
+      this.bind(2, weight.tex, l.uWeight)
+      gl.uniform1f(l.uInvert, m.invert)
+      gl.uniform1f(l.uOpacity, m.opacity)
+      this.draw()
+      cur = dst
+    }
+    return cur
   }
 
   /** Draws one frame for `recipe`. Cheap enough to call from a rAF loop. */
@@ -573,7 +785,8 @@ export class GpuRenderer {
     this.draw()
 
     for (const p of u.presence) {
-      this.presencePass(p, this.frames[cur], next())
+      const [s0, s1] = this.scratch(2)
+      this.presencePass(p, this.frames[cur], next(), this.width, this.height, s0, s1)
       done()
     }
 
@@ -584,9 +797,9 @@ export class GpuRenderer {
         // The two halves of the split are blurred independently and both have
         // to be live at the end, so each blur ping-pongs back into its own
         // buffer: luma across s0/s1, chroma across s1/s2.
-        this.planePass(PLANE_MEAN, this.frames[cur], s0)
+        this.planePass(PLANE_MEAN, this.frames[cur], s0, [this.width, this.height])
         const luma = d.luma ? this.gaussBlur(d.luma, s0, s1, s0) : s0
-        this.planePass(PLANE_CHROMA, this.frames[cur], s1)
+        this.planePass(PLANE_CHROMA, this.frames[cur], s1, [this.width, this.height])
         const chroma = d.chroma ? this.gaussBlur(d.chroma, s1, s2, s1) : s1
         const nl = this.begin('nr', next())
         this.bind(0, luma.tex, nl.uLuma)
@@ -635,20 +848,28 @@ export class GpuRenderer {
       outH = g.height
     }
 
+    // Stage 4, between geometry and the vignette — `render_float`'s order, and
+    // the reason mask coordinates are normalized in the *cropped* frame.
+    // Retouch would sit just before this; it is not implemented, and
+    // support.ts refuses any recipe that uses it.
+    let masked = false
+    if (u.masks.length > 0) {
+      out = this.maskStage(u.masks, out, outW, outH)
+      masked = true
+    }
+
     if (u.vignetteOn > 0.5) {
-      // The vignette needs somewhere the right size to land. After geometry
-      // that is the other half of the geometry pool; before it, the frame
-      // ping-pong as before.
-      const dst = u.geometry
-        ? this.geoFrames.find((t) => t !== out) ?? this.geoFrames[0]
-        : next()
+      // The vignette needs somewhere the right size to land: the free half of
+      // whichever pool last wrote the frame.
+      const pool = masked ? this.maskFrames : u.geometry ? this.geoFrames : null
+      const dst = pool ? pool.find((t) => t !== out) ?? pool[0] : next()
       const vl = this.begin('vignette', dst, [outW, outH])
       this.bind(0, out.tex, vl.uFrame)
       gl.uniform2f(vl.uResolution, outW, outH)
       gl.uniform4fv(vl.uVignette, u.vignette)
       this.draw()
       out = dst
-      if (!u.geometry) done()
+      if (!pool) done()
     }
 
     if (this.canvas.width !== outW || this.canvas.height !== outH) {
@@ -685,6 +906,8 @@ export class GpuRenderer {
     this.release(this.frames)
     this.release(this.aux)
     this.release(this.geoFrames)
+    this.release(this.maskFrames)
+    this.release(this.maskWeights)
     gl.deleteTexture(this.curveTex)
     gl.deleteProgram(this.edit)
     for (const p of Object.values(this.progs)) gl.deleteProgram(p)
