@@ -91,7 +91,7 @@ def test_source_etag_and_304(client):
     iid = _first_id(c)
     r = c.get(f"/api/v1/images/{iid}/source", params={"size": 512})
     etag = r.headers["ETag"]
-    assert "immutable" in r.headers["Cache-Control"]
+    assert "must-revalidate" in r.headers["Cache-Control"]
 
     again = c.get(
         f"/api/v1/images/{iid}/source",

@@ -1192,11 +1192,19 @@ def _recipe_for_variant(sc: Sidecar, variant: str | None) -> Recipe:
 
 # ---------- previews ----------
 
-#: Rendered imagery is addressed by a key that already covers the file mtime,
-#: the recipe and the pipeline version, so a given URL+ETag pair can never
-#: describe different pixels. That makes the response genuinely immutable and
-#: lets the browser skip revalidation entirely for a year.
-_IMMUTABLE = "private, max-age=31536000, immutable"
+#: Revalidate every time, and let the ETag make that cheap.
+#:
+#: This said `immutable` for a while, reasoning that the cache key covers the
+#: mtime, the recipe and the pipeline version. It does — but the key is in the
+#: *ETag*, not the URL, and `/preview?size=2048` is the same URL before and
+#: after an edit. `immutable` licenses a browser to serve its stored copy
+#: without asking, so an edit would land on disk and the tab would keep showing
+#: the render from before it until someone forced a reload.
+#:
+#: `immutable` is only ever truthful for a URL that names its own content.
+#: These do not, so they revalidate — which the ETag answers with a bodyless
+#: 304, keeping the bandwidth saving that mattered without the staleness.
+_REVALIDATE = "private, max-age=0, must-revalidate"
 
 
 def _etag_response(
@@ -1209,7 +1217,7 @@ def _etag_response(
     reuse what it already had.
     """
     etag = f'"{hashlib.sha1(etag_key.encode()).hexdigest()}"'
-    common = {"ETag": etag, "Cache-Control": _IMMUTABLE, **headers}
+    common = {"ETag": etag, "Cache-Control": _REVALIDATE, **headers}
 
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=common)
