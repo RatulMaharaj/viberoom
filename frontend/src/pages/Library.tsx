@@ -1,15 +1,14 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { Boxes, ArrowDown, ArrowUp, CheckSquare, Download, FolderOpen, RefreshCw, Square } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { api, type Filters, type Flag, type ImageMeta } from '../api'
-import { FlagBadge, RatingStars } from '../components/RatingStars'
 import { Brand } from '../components/Brand'
+import { ImageCard } from '../components/ImageCard'
 import { useFolderChooser } from '../folderChooser'
 import { ExportDialog } from '../components/ExportDialog'
 import { OrganizePanel } from '../components/OrganizePanel'
 import { FolderPicker } from '../components/FolderPicker'
 import { ModuleTabs } from '../components/ModuleTabs'
-import { exifLine } from '../exif'
 import { loadFilters, saveFilters } from '../filters'
 import { onSidecarChange } from '../events'
 import { loadLastImage, saveLastImage } from '../selection'
@@ -27,10 +26,10 @@ export function Library() {
       return next
     })
   const [selected, setSelectedState] = useState<string | null>(loadLastImage)
-  const setSelected = (id: string | null) => {
+  const setSelected = useCallback((id: string | null) => {
     setSelectedState(id)
     saveLastImage(id)
-  }
+  }, [])
   const [error, setError] = useState<string | null>(null)
   const [showPicker, setShowPicker] = useState(false)
   const [exts, setExts] = useState<string[]>([])
@@ -40,6 +39,14 @@ export function Library() {
   const [organize, setOrganize] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const { available: nativePicker, choose } = useFolderChooser()
+
+  // sets, not arrays: the grid tests membership once per card per render
+  const idFilterSet = useMemo(() => (idFilter ? new Set(idFilter) : null), [idFilter])
+  const multiSet = useMemo(() => new Set(multi), [multi])
+  const shown = useMemo(
+    () => (idFilterSet ? images.filter((im) => idFilterSet.has(im.id)) : images),
+    [images, idFilterSet],
+  )
 
   const refresh = useCallback(() => {
     api
@@ -76,27 +83,50 @@ export function Library() {
   const patchLocal = (id: string, patch: Partial<ImageMeta>) =>
     setImages((imgs) => imgs.map((im) => (im.id === id ? { ...im, ...patch } : im)))
 
-  const setRating = (id: string, rating: number) => {
-    const prev = images.find((im) => im.id === id)?.rating ?? 0
+  // the card handlers and the keydown listener must stay identity-stable, so
+  // they read the live images/selection through refs instead of closing over them
+  const imagesRef = useRef(images)
+  imagesRef.current = images
+  const selectedRef = useRef(selected)
+  selectedRef.current = selected
+
+  const setRating = useCallback((id: string, rating: number) => {
+    const prev = imagesRef.current.find((im) => im.id === id)?.rating ?? 0
     pushAction({
       undo: () => api.setRating(id, prev),
       redo: () => api.setRating(id, rating),
     })
     patchLocal(id, { rating })
     api.setRating(id, rating)
-  }
-  const setFlag = (id: string, flag: Flag) => {
-    const prev = images.find((im) => im.id === id)?.flag ?? null
+  }, [])
+  const setFlag = useCallback((id: string, flag: Flag) => {
+    const prev = imagesRef.current.find((im) => im.id === id)?.flag ?? null
     pushAction({
       undo: () => api.setFlag(id, prev),
       redo: () => api.setFlag(id, flag),
     })
     patchLocal(id, { flag })
     api.setFlag(id, flag)
-  }
+  }, [])
+
+  const openImage = useCallback((id: string) => navigate(`/edit/${id}`), [navigate])
+  const onCardClick = useCallback(
+    (id: string, e: MouseEvent) => {
+      setSelected(id)
+      // cmd/ctrl or shift extends the multi-selection used by the
+      // Organize panel (stacks, merge, collections)
+      const extend = e.metaKey || e.ctrlKey || e.shiftKey
+      setMulti((m) =>
+        extend ? (m.includes(id) ? m.filter((x) => x !== id) : [...m, id]) : [id],
+      )
+    },
+    [setSelected],
+  )
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const images = imagesRef.current
+      const selected = selectedRef.current
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return
       if (e.metaKey || e.ctrlKey) {
         handleUndoKey(e).then((consumed) => consumed && refresh())
@@ -119,8 +149,7 @@ export function Library() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, images, refresh])
+  }, [navigate, refresh, setFlag, setRating, setSelected])
 
   if (!libraryPath) {
     return (
@@ -243,7 +272,6 @@ export function Library() {
           className="btn btn-sm"
           title={multi.length ? 'Clear selection' : 'Select all shown'}
           onClick={() => {
-            const shown = images.filter((im) => !idFilter || idFilter.includes(im.id))
             setMulti(multi.length ? [] : shown.map((im) => im.id))
           }}
         >
@@ -271,53 +299,17 @@ export function Library() {
 
       <div className="flex">
       <div className="flex-1 p-4 grid gap-4 grid-cols-[repeat(auto-fill,minmax(220px,1fr))] content-start">
-        {images.filter((im) => !idFilter || idFilter.includes(im.id)).map((im) => (
-          <div
+        {shown.map((im) => (
+          <ImageCard
             key={im.id}
-            className={`card bg-base-200 shadow cursor-pointer transition overflow-hidden ${
-              selected === im.id ? 'outline-2 outline-primary' : multi.includes(im.id) ? 'outline-2 outline-secondary' : ''
-            }`}
-            onClick={(e) => {
-              setSelected(im.id)
-              // cmd/ctrl or shift extends the multi-selection used by the
-              // Organize panel (stacks, merge, collections)
-              setMulti((m) =>
-                e.metaKey || e.ctrlKey || e.shiftKey
-                  ? m.includes(im.id)
-                    ? m.filter((x) => x !== im.id)
-                    : [...m, im.id]
-                  : [im.id],
-              )
-            }}
-            onDoubleClick={() => navigate(`/edit/${im.id}`)}
-          >
-            <figure className="aspect-[3/2] bg-base-300 relative group">
-              <img
-                src={api.thumbnailUrl(im.id)}
-                alt={im.filename}
-                loading="lazy"
-                className="object-cover w-full h-full"
-              />
-              {exifLine(im.exif) && (
-                <div className="absolute inset-x-0 bottom-0 bg-black/70 text-[10px] font-mono text-white/90 px-2 py-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  {exifLine(im.exif)}
-                </div>
-              )}
-            </figure>
-            <div className="card-body p-3 gap-1">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-xs truncate">{im.filename}</span>
-                <div className="flex gap-1 shrink-0">
-                  {im.is_raw && <span className="badge badge-xs badge-neutral">RAW</span>}
-                  {im.has_edits && <span className="badge badge-xs badge-info">edited</span>}
-                </div>
-              </div>
-              <div className="flex items-center justify-between">
-                <RatingStars rating={im.rating} onChange={(r) => setRating(im.id, r)} size="xs" />
-                <FlagBadge flag={im.flag} onChange={(f) => setFlag(im.id, f)} />
-              </div>
-            </div>
-          </div>
+            image={im}
+            selected={selected === im.id}
+            multi={multiSet.has(im.id)}
+            onClick={onCardClick}
+            onOpen={openImage}
+            onRate={setRating}
+            onFlag={setFlag}
+          />
         ))}
         {images.length === 0 && (
           <p className="opacity-60 col-span-full text-center py-16">No images match.</p>

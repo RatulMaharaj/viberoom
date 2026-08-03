@@ -21,9 +21,26 @@ export interface ImageMeta {
 export interface Filters {
   rating_gte?: number
   flag?: 'pick' | 'reject' | 'none'
+  label?: 'red' | 'yellow' | 'green' | 'blue' | 'purple' | 'none'
+  keyword?: string
+  camera?: string
+  lens?: string
+  iso_gte?: number
+  iso_lte?: number
+  taken_after?: string
+  taken_before?: string
+  q?: string
+  folder?: string
   ext?: string
-  sort?: 'filename' | 'mtime' | 'rating'
+  has_edits?: boolean
+  has_gps?: boolean
+  faces_gte?: number
+  collection?: string
+  stacks?: 'collapse'
+  sort?: 'filename' | 'mtime' | 'rating' | 'taken_at'
   order?: 'asc' | 'desc'
+  limit?: number
+  offset?: number
 }
 
 async function json<T>(res: Response): Promise<T> {
@@ -96,12 +113,13 @@ export const api = {
 
   listImages: (f: Filters = {}) => {
     const params = new URLSearchParams()
-    if (f.rating_gte) params.set('rating_gte', String(f.rating_gte))
-    if (f.flag) params.set('flag', f.flag)
-    if (f.ext) params.set('ext', f.ext)
-    if (f.sort) params.set('sort', f.sort)
-    if (f.order) params.set('order', f.order)
-    params.set('limit', '500')
+    // every key of Filters is a query param the backend understands; empty
+    // strings and undefined mean "no filter", but false/0 are real values
+    for (const [k, v] of Object.entries(f)) {
+      if (v === undefined || v === null || v === '') continue
+      params.set(k, String(v))
+    }
+    if (!f.limit) params.set('limit', '500')
     return fetch(`${BASE}/images?${params}`).then((r) =>
       json<{ total: number; images: ImageMeta[] }>(r),
     )

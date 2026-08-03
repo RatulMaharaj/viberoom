@@ -7,9 +7,9 @@ import { Brand } from '../components/Brand'
 import { CropTool } from '../components/CropTool'
 import { ExportDialog } from '../components/ExportDialog'
 import { EditPanel } from '../components/EditPanel'
+import { Filmstrip } from '../components/Filmstrip'
 import { ModuleTabs } from '../components/ModuleTabs'
 import { ZoomableImage } from '../components/ZoomableImage'
-import { cameraLine, exifLine } from '../exif'
 import { loadFilters } from '../filters'
 import { onSidecarChange } from '../events'
 import { loadLastImage, saveLastImage } from '../selection'
@@ -23,7 +23,6 @@ export function Edit() {
   const [bust, setBust] = useState('')
   const [fullscreen, setFullscreen] = useState(false)
   const [zoomed, setZoomed] = useState(false)
-  const [hovered, setHovered] = useState<ImageMeta | null>(null)
   const [showBefore, setShowBefore] = useState(false)
   const [panelVersion, setPanelVersion] = useState(0)
   const [liveFilter, setLiveFilter] = useState('')
@@ -68,6 +67,8 @@ export function Edit() {
     },
     [idx, siblings, navigate],
   )
+
+  const openImage = useCallback((next: string) => navigate(`/edit/${next}`), [navigate])
 
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) {
@@ -247,49 +248,7 @@ export function Edit() {
       )}
 
       {!fullscreen && (
-        <>
-          <div className="h-7 shrink-0 bg-base-100 border-t border-base-300/30 flex items-center gap-3 px-3 text-xs">
-            {(() => {
-              const info = hovered ?? image
-              if (!info) return null
-              return (
-                <>
-                  <span className="font-mono font-bold">{info.filename}</span>
-                  <span className="opacity-70 font-mono">{exifLine(info.exif)}</span>
-                  <span className="opacity-40 truncate">{cameraLine(info.exif)}</span>
-                  <div className="flex-1" />
-                  {info.rating > 0 && (
-                    <span className="text-amber-400">{'★'.repeat(info.rating)}</span>
-                  )}
-                  {info.flag && (
-                    <span className={info.flag === 'pick' ? 'text-success' : 'text-error'}>
-                      {info.flag}
-                    </span>
-                  )}
-                  <span className="opacity-50 font-mono">
-                    {(hovered ? siblings.findIndex((s) => s.id === hovered.id) : idx) + 1} / {siblings.length}
-                  </span>
-                </>
-              )
-            })()}
-          </div>
-          <div className="h-24 shrink-0 bg-base-200 flex gap-1 items-center overflow-x-auto px-2">
-            {siblings.map((im) => (
-              <img
-                key={im.id}
-                src={api.thumbnailUrl(im.id)}
-                alt={im.filename}
-                loading="lazy"
-                onClick={() => navigate(`/edit/${im.id}`)}
-                onMouseEnter={() => setHovered(im)}
-                onMouseLeave={() => setHovered(null)}
-                className={`h-20 w-auto object-cover rounded cursor-pointer ${
-                  im.id === id ? 'ring-2 ring-primary' : 'opacity-70 hover:opacity-100'
-                }`}
-              />
-            ))}
-          </div>
-        </>
+        <Filmstrip siblings={siblings} image={image} id={id} idx={idx} onPick={openImage} />
       )}
     </div>
   )
