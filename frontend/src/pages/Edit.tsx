@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Crop, Download, Maximize, Minimize } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
+import { unsupportedReason } from '../local/unsupported'
 import { getSource, type Flag, type ImageMeta, type PhotoSource, type SourceUrl } from '../source'
 import { useThumbnails } from '../local/useThumbnails'
 import { FlagBadge, RatingStars } from '../components/RatingStars'
@@ -66,7 +67,10 @@ export function Edit() {
     // Locally there is no server render to swap in and no `/source` endpoint
     // to feed the renderer, so this hook stays off entirely; `local/preview.ts`
     // drives the same GPU chain from the file itself instead.
-    enabled: !local && !proof && !showBefore && !cropMode && !zoomed,
+    // `kind === 'server'` and not `!local`: source starts null while the probe
+    // is in flight, so `!local` is true before we know anything — and this hook
+    // would fire /source and /preview at a backend that is not there.
+    enabled: source?.kind === 'server' && !proof && !showBefore && !cropMode && !zoomed,
     commitTick,
   })
 
@@ -266,7 +270,18 @@ export function Edit() {
 
       <div className="flex-1 min-h-0 flex">
       <div className="flex-1 min-h-0 relative flex items-center justify-center bg-base-300">
-        {id && (
+        {/* Decoding a RAW and rendering it takes a moment, and there is no
+            server frame to show meanwhile. Rendering the loupe with an empty
+            src made the browser resolve it to the page, fail, and draw its
+            broken-image glyph with the filename underneath — a failure where
+            the truth was "not yet". */}
+        {id && (!source || (local && !localFrame)) && (
+          <div className="absolute inset-0 m-8 skeleton rounded-box" />
+        )}
+        {/* Not until the source is known. Rendering earlier meant falling
+            through to the server's preview URL, which in a PWA is a request to
+            a backend that does not exist. The skeleton above covers the gap. */}
+        {id && source && (
           <ZoomableImage
             resetKey={id}
             src={
@@ -318,6 +333,11 @@ export function Edit() {
         )}
         {/* The one case where local and server disagree about what is on
             screen, so it is said out loud rather than shown quietly. */}
+        {local && image && unsupportedReason(image.filename) && (
+          <span className="absolute top-3 left-3 badge badge-warning gap-1 font-mono">
+            Desktop only — {unsupportedReason(image.filename)}
+          </span>
+        )}
         {local && !showBefore && !localFrame?.asked && gpuMode !== 'gpu'
           && localFrame?.rendered === 'original' && image?.has_edits && (
           <span className="absolute top-3 right-3 badge badge-warning gap-1 font-mono">

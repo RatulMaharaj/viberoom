@@ -6,6 +6,7 @@ const Thumb = memo(function Thumb({
   image,
   current,
   src,
+  local,
   onPick,
   onHover,
 }: {
@@ -13,9 +14,17 @@ const Thumb = memo(function Thumb({
   current: boolean
   /** Set only in the no-server build; see ImageCard's `thumbSrc`. */
   src?: string
+  /** No server to fall back to: draw a skeleton, not a broken image. */
+  local?: boolean
   onPick: (id: string) => void
   onHover: (im: ImageMeta | null) => void
 }) {
+  // Locally the thumbnail is a decode away, so for a moment there is no src.
+  // Falling through to the server's URL drew a broken-image glyph on every
+  // frame until it landed.
+  if (src === undefined && local) {
+    return <div className="h-20 w-28 skeleton rounded shrink-0" />
+  }
   return (
     <img
       src={src ?? api.thumbnailUrl(image.id)}
@@ -39,6 +48,7 @@ export function Filmstrip({
   id,
   idx,
   thumbSrcs,
+  local,
   onPick,
 }: {
   siblings: ImageMeta[]
@@ -47,6 +57,7 @@ export function Filmstrip({
   idx: number
   /** id -> tile URL, in the no-server build only. */
   thumbSrcs?: Record<string, string>
+  local?: boolean
   onPick: (id: string) => void
 }) {
   const [hovered, setHovered] = useState<ImageMeta | null>(null)
@@ -60,11 +71,12 @@ export function Filmstrip({
           image={im}
           current={im.id === id}
           src={thumbSrcs?.[im.id]}
+          local={local}
           onPick={onPick}
           onHover={setHovered}
         />
       )),
-    [siblings, id, onPick, thumbSrcs],
+    [siblings, id, onPick, thumbSrcs, local],
   )
 
   const position = (hovered ? siblings.findIndex((s) => s.id === hovered.id) : idx) + 1

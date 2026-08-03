@@ -367,6 +367,7 @@ export function Library() {
             selected={selected === im.id}
             multi={multiSet.has(im.id)}
             thumbSrc={thumbs[im.id]}
+            local={local}
             onClick={onCardClick}
             onOpen={openImage}
             onRate={setRating}
