@@ -7,9 +7,15 @@
 export function UpdatePrompt({ onReload }: { onReload: () => void }) {
   return (
     <div className="toast toast-end z-50">
-      <div className="alert alert-info gap-4">
+      {/* Not `alert-info`: daisyUI's info is a fixed blue and ignores the
+          theme, so this was the one piece of chrome not wearing the app's own
+          paper white. */}
+      <div className="alert bg-primary text-primary-content border-primary gap-4">
         <span>A new version of Viberoom is ready.</span>
-        <button className="btn btn-sm" onClick={onReload}>
+        <button
+          className="btn btn-sm btn-neutral"
+          onClick={onReload}
+        >
           Reload
         </button>
       </div>

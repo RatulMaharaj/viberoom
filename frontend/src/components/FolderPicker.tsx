@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus } from 'lucide-react'
 import { api } from '../api'
+import { getSource } from '../source'
 
 interface NodeProps {
   path: string
@@ -159,7 +160,21 @@ export function FolderPicker({
     }
   }
 
+  const [localMode, setLocalMode] = useState(false)
   useEffect(() => {
+    getSource().then((s) => setLocalMode(s.kind !== 'server')).catch(() => setLocalMode(true))
+  }, [])
+
+  useEffect(() => {
+    // This browses the *server's* filesystem. With no backend there is nothing
+    // to list, and asking anyway is how a static host's "here is the app
+    // shell" answer for /api/v1/fs surfaces as an error to the user. Checked
+    // here rather than at each call site: three components render this, and
+    // the next one to do so should not have to remember.
+    if (localMode) {
+      setError('Browsing folders needs the desktop app — use "Choose a folder" instead.')
+      return
+    }
     api
       .browseFs(undefined, hidden)
       .then((r) => {
@@ -176,7 +191,7 @@ export function FolderPicker({
       })
       .catch((e) => setError(String(e)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, hidden])
+  }, [current, hidden, localMode])
 
   return (
     <dialog className="modal modal-open">
