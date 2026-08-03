@@ -162,6 +162,32 @@ export function useGpuPreview({ imageId, size, live, enabled, commitTick }: Opti
     let drawnVersion = -1
     let current: PreviewMode = 'off'
     let redrawOnShow = false
+
+    /** Does this recipe describe the same edit as the one already on screen?
+     *
+     *  Identity alone is not enough. The develop panel refetches the recipe
+     *  after every commit and republishes it — same values, new object — which
+     *  read as a fresh edit and bounced the preview back to the GPU it had
+     *  just handed off from, about 130ms later. That was the flash.
+     *
+     *  Comparing by value is the fix, but it must not run per frame: during a
+     *  drag the recipe genuinely changes and this would serialize it 60 times
+     *  a second. `live.version` only moves on a real publish, so the answer is
+     *  cached against it and each published recipe is serialized at most once.
+     */
+    //  Keyed on the shown frame too, not just the version: a server render
+    //  landing changes what is on screen without the recipe moving at all.
+    let checkedKey = ''
+    let checkedResult = false
+    const sameAsShown = (recipe: unknown): boolean => {
+      const key = `${live.version}:${shownHash.current}`
+      if (key === checkedKey) return checkedResult
+      checkedKey = key
+      checkedResult =
+        shownRecipe.current != null &&
+        JSON.stringify(shownRecipe.current) === JSON.stringify(recipe)
+      return checkedResult
+    }
     const to = (next: PreviewMode) => {
       // setState only on a real transition: this runs 60 times a second and a
       // redundant update would re-render the whole develop panel each frame.
@@ -194,7 +220,7 @@ export function useGpuPreview({ imageId, size, live, enabled, commitTick }: Opti
         to('off')
         return
       }
-      if (shownRecipe.current === recipe) {
+      if (shownRecipe.current === recipe || sameAsShown(recipe)) {
         to('server')
         return
       }
