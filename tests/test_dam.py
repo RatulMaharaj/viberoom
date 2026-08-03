@@ -210,3 +210,81 @@ def test_extra_root_scanned_and_usable(client):
     # removing the root prunes its images
     r = c.request("DELETE", "/api/v1/library/roots", params={"path": str(other)})
     assert r.json()["total"] == 3
+
+
+# ---------- catalog DB: WAL, per-thread connections, transactions ----------
+
+def test_wal_enabled_and_files_land_next_to_the_db(tmp_path):
+    from viberoom.catalog.db import CatalogDB
+
+    db = CatalogDB(tmp_path / "catalog.db")
+    assert db.query("PRAGMA journal_mode")[0][0] == "wal"
+    assert db.query("PRAGMA synchronous")[0][0] == 1  # NORMAL
+    db.execute("INSERT INTO images (id, rel_path, filename, ext, is_raw, filesize, mtime)"
+               " VALUES ('a','a.jpg','a.jpg','.jpg',0,1,1.0)")
+    assert (tmp_path / "catalog.db-wal").exists()
+    db.close()
+
+
+def test_second_open_of_the_same_library_sees_the_same_rows(tmp_path):
+    from viberoom.catalog.db import CatalogDB
+
+    a = CatalogDB(tmp_path / "catalog.db")
+    a.execute("INSERT INTO images (id, rel_path, filename, ext, is_raw, filesize, mtime)"
+              " VALUES ('a','a.jpg','a.jpg','.jpg',0,1,1.0)")
+    b = CatalogDB(tmp_path / "catalog.db")  # re-open must not fail or lose data
+    assert len(b.query("SELECT id FROM images")) == 1
+    a.close()
+    b.close()
+
+
+def test_transaction_batches_and_rolls_back(tmp_path):
+    from viberoom.catalog.db import CatalogDB
+
+    db = CatalogDB(tmp_path / "catalog.db")
+    with db.transaction():
+        for i in range(5):
+            db.execute("INSERT INTO images (id, rel_path, filename, ext, is_raw, filesize,"
+                       " mtime) VALUES (?,?,?,'.jpg',0,1,1.0)", (str(i), f"{i}.jpg", f"{i}.jpg"))
+    assert len(db.query("SELECT id FROM images")) == 5
+    with pytest.raises(RuntimeError):
+        with db.transaction():
+            db.execute("UPDATE images SET rating=3")
+            raise RuntimeError("boom")
+    assert all(r["rating"] == 0 for r in db.query("SELECT rating FROM images"))
+    db.close()
+
+
+def test_reader_thread_not_blocked_by_an_open_write_transaction(tmp_path):
+    """WAL + a connection per thread: a reader gets its snapshot immediately
+    instead of waiting behind the writer."""
+    import threading
+
+    from viberoom.catalog.db import CatalogDB
+
+    db = CatalogDB(tmp_path / "catalog.db")
+    db.execute("INSERT INTO images (id, rel_path, filename, ext, is_raw, filesize, mtime)"
+               " VALUES ('a','a.jpg','a.jpg','.jpg',0,1,1.0)")
+    seen, done = [], threading.Event()
+
+    def reader():
+        seen.append(db.query("SELECT rating FROM images WHERE id='a'")[0]["rating"])
+        done.set()
+
+    with db.transaction():
+        db.execute("UPDATE images SET rating=5 WHERE id='a'")
+        t = threading.Thread(target=reader)
+        t.start()
+        assert done.wait(5), "reader blocked behind the open write transaction"
+        t.join()
+    assert seen == [0]  # pre-commit snapshot, not a lock timeout
+    assert db.query("SELECT rating FROM images WHERE id='a'")[0]["rating"] == 5
+    db.close()
+
+
+def test_rowcount_survives_thread_local_cursors(client):
+    """stacks.unstack reads cur.rowcount off the cursor db.execute returns."""
+    c, _, _ = client
+    ids = [im["id"] for im in c.get("/api/v1/images").json()["images"]][:2]
+    leader = c.post("/api/v1/stacks", json={"image_ids": ids}).json()["leader"]
+    assert c.request("DELETE", f"/api/v1/stacks/{leader}").json()["unstacked"] == 2

@@ -83,6 +83,10 @@ def summarize_exif(exif: dict) -> dict:
         "lens": exif.get("LensModel") or None,
         "iso": int(iso) if iso else None,
         "focal_length": focal,
+        # the grid caption reads "f/2.8 · 1/250s" off these; without them the
+        # list endpoint would have to ship every row's whole EXIF blob to say it
+        "aperture": _num(exif.get("FNumber")),
+        "shutter": _num(exif.get("ExposureTime")),
         "taken_at": taken,
         "gps_lat": lat,
         "gps_lon": lon,
@@ -133,8 +137,8 @@ def scan(library: Library, db: CatalogDB, full: bool = False) -> dict:
                 """INSERT INTO images (id, rel_path, filename, ext, is_raw, filesize,
                        mtime, width, height, exif_json, rating, flag, label, keywords_json,
                        has_edits, sidecar_mtime, camera, lens, iso, focal_length, taken_at,
-                       gps_lat, gps_lon)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       gps_lat, gps_lon, aperture, shutter)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET filesize=excluded.filesize,
                        mtime=excluded.mtime, width=excluded.width, height=excluded.height,
                        exif_json=excluded.exif_json, rating=excluded.rating,
@@ -143,7 +147,8 @@ def scan(library: Library, db: CatalogDB, full: bool = False) -> dict:
                        sidecar_mtime=excluded.sidecar_mtime, camera=excluded.camera,
                        lens=excluded.lens, iso=excluded.iso,
                        focal_length=excluded.focal_length, taken_at=excluded.taken_at,
-                       gps_lat=excluded.gps_lat, gps_lon=excluded.gps_lon""",
+                       gps_lat=excluded.gps_lat, gps_lon=excluded.gps_lon,
+                       aperture=excluded.aperture, shutter=excluded.shutter""",
                 (
                     iid, rel, name, p.suffix.lower(), int(is_raw(p)), stat.st_size,
                     stat.st_mtime, width, height, json.dumps(exif), sc.rating, sc.flag,
@@ -151,6 +156,7 @@ def scan(library: Library, db: CatalogDB, full: bool = False) -> dict:
                     summary["camera"], summary["lens"], summary["iso"],
                     summary["focal_length"], summary["taken_at"],
                     summary["gps_lat"], summary["gps_lon"],
+                    summary["aperture"], summary["shutter"],
                 ),
             )
             if row:

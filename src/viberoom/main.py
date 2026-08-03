@@ -541,15 +541,59 @@ def make_dir(body: MkdirIn) -> dict:
 
 # ---------- images ----------
 
+# Everything a grid row needs, minus the multi-KB exif_json blob: parsing it for
+# 500 rows dominated the list endpoint. faces_json is likewise counted in SQL.
+# The full blob still ships from GET /images/{id}, which is what the editor reads.
+_LIST_COLUMNS = (
+    "id, rel_path, filename, ext, is_raw, filesize, mtime, width, height, rating,"
+    " flag, has_edits, sidecar_mtime, label, keywords_json, camera, lens, iso,"
+    " focal_length, aperture, shutter, taken_at, stack_id, gps_lat, gps_lon, dhash,"
+    " CASE WHEN faces_json IS NULL THEN NULL ELSE json_array_length(faces_json) END AS faces"
+)
+
+
+def _summary_exif(d: dict) -> dict:
+    """Rebuild the handful of EXIF keys the UI's caption line reads out of the
+    denormalized columns, so list rows keep the same `exif` shape as detail rows.
+    Values are strings because that is what the scanner stores."""
+    pairs = (
+        ("Model", d.get("camera")), ("LensModel", d.get("lens")),
+        ("ISO", d.get("iso")), ("FocalLength", d.get("focal_length")),
+        ("FNumber", d.get("aperture")), ("ExposureTime", d.get("shutter")),
+        ("DateTimeOriginal", d.get("taken_at")),
+    )
+    return {k: str(v) for k, v in pairs if v is not None}
+
+
 def _row_to_dict(row) -> dict:
     d = dict(row)
-    d["exif"] = json.loads(d.pop("exif_json"))
+    if "exif_json" in d:
+        d["exif"] = json.loads(d.pop("exif_json"))
+    else:
+        d["exif"] = _summary_exif(d)
     d["keywords"] = json.loads(d.pop("keywords_json") or "[]")
-    faces = d.pop("faces_json", None)
-    d["faces"] = len(json.loads(faces)) if faces else None  # None = not scanned
+    if "faces_json" in d:
+        faces = d.pop("faces_json")
+        d["faces"] = len(json.loads(faces)) if faces else None  # None = not scanned
     d["is_raw"] = bool(d["is_raw"])
     d["has_edits"] = bool(d["has_edits"])
     return d
+
+
+def _image_paths(image_ids: list[str]) -> dict[str, Path]:
+    """Resolve many ids in one pass — a batch op over 1000 ids was 1000 queries.
+    Unknown ids are simply absent from the result."""
+    lib = state.require_library()
+    found: dict[str, Path] = {}
+    for i in range(0, len(image_ids), 500):  # SQLITE_MAX_VARIABLE_NUMBER is 999
+        chunk = image_ids[i:i + 500]
+        rows = state.db().query(
+            f"SELECT id, rel_path FROM images WHERE id IN ({','.join('?' * len(chunk))})",
+            tuple(chunk),
+        )
+        for r in rows:
+            found[r["id"]] = lib.resolve(r["rel_path"])
+    return found
 
 
 def _image_path(image_id: str) -> Path:
@@ -685,7 +729,8 @@ def list_images(
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     total = state.db().query(f"SELECT COUNT(*) AS n FROM images {clause}", tuple(params))[0]["n"]
     rows = state.db().query(
-        f"SELECT * FROM images {clause} ORDER BY {sort} {order.upper()} LIMIT ? OFFSET ?",
+        f"SELECT {_LIST_COLUMNS} FROM images {clause}"
+        f" ORDER BY {sort} {order.upper()} LIMIT ? OFFSET ?",
         tuple(params) + (limit, offset),
     )
     return {"total": total, "images": [_row_to_dict(r) for r in rows]}
@@ -784,8 +829,10 @@ def create_stack(body: StackIn) -> dict:
     from viberoom.catalog.stacks import set_stack
 
     state.require_library()
+    known = _image_paths(body.image_ids)
     for iid in body.image_ids:
-        _image_path(iid)  # 404 on unknown ids
+        if iid not in known:
+            raise HTTPException(404, f"unknown image id {iid}")
     return set_stack(state.db(), body.image_ids)
 
 
@@ -1444,9 +1491,12 @@ def faces_scan(body: FacesScanIn | None = None) -> dict:
     b = body or FacesScanIn()
     ids = b.image_ids or [r["id"] for r in state.db().query("SELECT id FROM images")]
     scanned, with_faces, errors = 0, 0, []
+    paths = _image_paths(ids)  # one query instead of one per image
     for iid in ids:
         try:
-            path = _image_path(iid)
+            path = paths.get(iid)
+            if path is None:
+                raise HTTPException(404, f"unknown image id {iid}")
             img = linear_to_srgb(_decode_cache.get(path, half_size=True))
             faces = ml.detect_faces(img, threshold=b.threshold)
         except ml.MLUnavailable as e:
@@ -1495,7 +1545,11 @@ def _merge(kind: Literal["hdr", "pano"], body: MergeIn) -> dict:
     from viberoom.merge import merge_hdr, merge_pano
 
     lib = state.require_library()
-    paths = [_image_path(iid) for iid in body.image_ids]
+    resolved = _image_paths(body.image_ids)
+    for iid in body.image_ids:
+        if iid not in resolved:
+            raise HTTPException(404, f"unknown image id {iid}")
+    paths = [resolved[iid] for iid in body.image_ids]
     fused = merge_hdr(paths) if kind == "hdr" else merge_pano(paths)
     name = body.out_name or f"{kind}-{paths[0].stem}"
     if not _VERSION_NAME_RE.match(name):
