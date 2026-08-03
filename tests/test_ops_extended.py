@@ -285,3 +285,173 @@ def test_separable_blur_does_not_mutate_its_input():
     before = img.copy()
     _blur(img, 1.5)
     np.testing.assert_array_equal(img, before)
+
+
+def test_box_blur_is_independent_of_the_cumsum_chunk_size():
+    """The float64 cumsum is sliced across the non-blurred axis to keep the
+    temporary cache-sized. Every line accumulates on its own, so the chunk
+    size must not be able to change a single bit of the result."""
+    from viberoom.engine.ops import blur
+
+    rng = np.random.default_rng(11)
+    for shape in ((64, 96), (64, 96, 3)):
+        img = rng.random(shape, dtype=np.float32)
+        whole = blur._box_blur_axis(img, 7, 0), blur._box_blur_axis(img, 7, 1)
+        original = blur._CUMSUM_SCRATCH_BYTES
+        try:
+            blur._CUMSUM_SCRATCH_BYTES = 1  # forces one line per chunk
+            tiny = blur._box_blur_axis(img, 7, 0), blur._box_blur_axis(img, 7, 1)
+        finally:
+            blur._CUMSUM_SCRATCH_BYTES = original
+        for a, b in zip(whole, tiny):
+            np.testing.assert_array_equal(a, b)
+
+
+def test_fast_blur_does_not_mutate_a_read_only_input():
+    """fast_blur ping-pongs between two scratch buffers; neither may be the
+    caller's array, which for a decode-cache entry is not even writeable."""
+    from viberoom.engine.ops.blur import fast_blur
+
+    img = np.random.default_rng(12).random((24, 24, 3), dtype=np.float32)
+    before = img.copy()
+    img.flags.writeable = False
+    fast_blur(img, 3.0)
+    np.testing.assert_array_equal(img, before)
+
+
+def test_hsv_round_trip_matches_the_reference_formulation():
+    """The conversions traded np.choose and np.where chains for cheaper
+    selections. Bit-for-bit, not merely close."""
+    from viberoom.engine.ops.color import _hsv_to_rgb, _rgb_to_hsv
+
+    def ref_rgb_to_hsv(img):
+        r, g, b = img[..., 0], img[..., 1], img[..., 2]
+        maxc, minc = np.max(img, axis=-1), np.min(img, axis=-1)
+        delta = maxc - minc
+        s = np.where(maxc > 0, delta / np.maximum(maxc, 1e-8), 0)
+        h = np.zeros_like(maxc)
+        mask = delta > 1e-8
+        rc = np.where(mask, (maxc - r) / np.maximum(delta, 1e-8), 0)
+        gc = np.where(mask, (maxc - g) / np.maximum(delta, 1e-8), 0)
+        bc = np.where(mask, (maxc - b) / np.maximum(delta, 1e-8), 0)
+        h = np.where((maxc == r) & mask, bc - gc, h)
+        h = np.where((maxc == g) & mask, 2.0 + rc - bc, h)
+        h = np.where((maxc == b) & mask, 4.0 + gc - rc, h)
+        return (h / 6.0) % 1.0, s, maxc
+
+    def ref_hsv_to_rgb(h, s, v):
+        i = (h * 6.0).astype(np.int32) % 6
+        f = h * 6.0 - np.floor(h * 6.0)
+        p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
+        return np.stack(
+            [
+                np.choose(i, [v, q, p, p, t, v]),
+                np.choose(i, [t, v, v, q, p, p]),
+                np.choose(i, [p, p, t, v, v, q]),
+            ],
+            axis=-1,
+        ).astype(np.float32)
+
+    rng = np.random.default_rng(13)
+    img = rng.random((40, 40, 3), dtype=np.float32)
+    # gray and near-gray pixels are the branchy corner of both conversions
+    img[0, :] = img[0, :1]
+    img[1, :] = 0.0
+
+    hsv, ref_hsv = _rgb_to_hsv(img), ref_rgb_to_hsv(img)
+    for got, want in zip(hsv, ref_hsv):
+        np.testing.assert_array_equal(got, want)
+    np.testing.assert_array_equal(_hsv_to_rgb(*hsv), ref_hsv_to_rgb(*ref_hsv))
+
+
+def test_white_balance_out_writes_in_place_and_is_optional():
+    from viberoom.engine.ops.color import apply_white_balance
+    from viberoom.recipe.schema import WhiteBalance
+
+    wb = WhiteBalance(temp=7000, tint=10)
+    img = np.random.default_rng(14).random((8, 8, 3), dtype=np.float32)
+
+    fresh = apply_white_balance(img.copy(), wb)
+    buf = img.copy()
+    same = apply_white_balance(buf, wb, out=buf)
+    assert same is buf
+    np.testing.assert_array_equal(same, fresh)
+    # without `out` the caller's array is left alone
+    before = img.copy()
+    apply_white_balance(img, wb)
+    np.testing.assert_array_equal(img, before)
+
+
+def test_brush_strokes_accumulate_into_one_shared_buffer():
+    """Compositing only inside each stroke's bounding box has to match the
+    full-frame accumulation it replaced, erase strokes included."""
+    from viberoom.engine.ops.masks import _brush_weight, stroke_weight
+    from viberoom.recipe.schema import BrushMask, BrushStroke
+
+    strokes = [
+        BrushStroke(points=[(0.2, 0.2), (0.35, 0.4)], radius=0.08, flow=80),
+        BrushStroke(points=[(0.6, 0.7)], radius=0.12, feather=60),
+        BrushStroke(points=[(0.3, 0.3)], radius=0.05, erase=True),
+    ]
+    h, w = 40, 60
+    ref = np.zeros((h, w), dtype=np.float32)
+    for stroke in strokes:
+        sw = stroke_weight(stroke, h, w)
+        ref = ref * (1.0 - sw) if stroke.erase else 1.0 - (1.0 - ref) * (1.0 - sw)
+
+    np.testing.assert_array_equal(_brush_weight(BrushMask(strokes=strokes), h, w), ref)
+
+
+def test_cropped_local_adjust_matches_the_full_frame_blend():
+    """A brush dab must not pay for adjusting the whole frame — and the
+    cropped path has to be indistinguishable from the one it skips."""
+    from viberoom.engine.ops import masks as masks_mod
+    from viberoom.recipe.schema import BrushMask, BrushStroke
+
+    img = np.random.default_rng(15).random((64, 96, 3), dtype=np.float32)
+    mask = BrushMask(
+        strokes=[BrushStroke(points=[(0.25, 0.3)], radius=0.06, feather=50)],
+        adjustments=LocalAdjustments(exposure=0.6, contrast=25, saturation=30, sharpness=40),
+    )
+
+    cropped = apply_masks(img, [mask])
+    original = masks_mod._weight_box
+    try:
+        masks_mod._weight_box = lambda weight, margin: None  # force the full-frame path
+        full = apply_masks(img, [mask])
+    finally:
+        masks_mod._weight_box = original
+
+    assert masks_mod._weight_box(masks_mod.mask_weight(mask, img), 0) is not None
+    np.testing.assert_array_equal(cropped, full)
+
+
+def test_local_adjust_with_blur_sliders_is_never_cropped():
+    """Dehaze and clarity derive their radius from the frame they are handed,
+    so cropping would silently change the radius, not just the context."""
+    from viberoom.engine.ops.masks import _adjust_margin
+
+    assert _adjust_margin(LocalAdjustments(exposure=1.0), 2000, 3000) == 0
+    assert _adjust_margin(LocalAdjustments(sharpness=50), 2000, 3000) > 0
+    assert _adjust_margin(LocalAdjustments(clarity=50), 2000, 3000) is None
+    assert _adjust_margin(LocalAdjustments(dehaze=50), 2000, 3000) is None
+
+
+def test_apply_masks_does_not_mutate_a_read_only_input():
+    """apply_masks now writes into its own buffer in place; that buffer must
+    never be the decode-cache array it was handed."""
+    from viberoom.recipe.schema import BrushMask, BrushStroke
+
+    img = np.random.default_rng(16).random((32, 32, 3), dtype=np.float32)
+    before = img.copy()
+    img.flags.writeable = False
+    apply_masks(
+        img,
+        [
+            BrushMask(
+                strokes=[BrushStroke(points=[(0.5, 0.5)], radius=0.2)],
+                adjustments=LocalAdjustments(exposure=1.0),
+            )
+        ],
+    )
+    np.testing.assert_array_equal(img, before)

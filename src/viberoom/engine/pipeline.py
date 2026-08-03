@@ -34,6 +34,23 @@ from viberoom.engine.ops.tone import (
 from viberoom.recipe.schema import Recipe
 
 
+def _owned(x: np.ndarray, src: np.ndarray) -> bool:
+    """True when `x` is a buffer this pipeline allocated and may write into.
+
+    Every op returns its input untouched when its slider is at zero, so even
+    after twenty of them `x` can still be `src` — which is either the caller's
+    array or a decode-cache entry that is deliberately read-only. `base is
+    None` rules out the views `apply_geometry` can hand back of the same
+    memory.
+    """
+    return (
+        x is not src
+        and x.base is None
+        and x.dtype == np.float32
+        and x.flags.writeable
+    )
+
+
 def render_float(linear: np.ndarray, recipe: Recipe, scale: float = 1.0) -> np.ndarray:
     """Apply a recipe to a decoded linear image. Returns float32 sRGB HxWx3
     in [0,1] (use for high-bit-depth export).
@@ -44,7 +61,7 @@ def render_float(linear: np.ndarray, recipe: Recipe, scale: float = 1.0) -> np.n
     "this is the real thing", which is what export and the tests want.
     """
     x = apply_lens(linear, recipe.lens)
-    x = apply_white_balance(x, recipe.whiteBalance)
+    x = apply_white_balance(x, recipe.whiteBalance, out=x if _owned(x, linear) else None)
     x = apply_exposure(x, recipe.tone.exposure)
     x = apply_regions(x, recipe.tone)
 
@@ -65,9 +82,19 @@ def render_float(linear: np.ndarray, recipe: Recipe, scale: float = 1.0) -> np.n
     x = apply_masks(x, recipe.masks)
     x = apply_effects(x, recipe.effects)
 
-    return np.clip(x, 0, 1).astype(np.float32)
+    if _owned(x, linear):
+        return np.clip(x, 0, 1, out=x)
+    return np.clip(x, 0, 1).astype(np.float32, copy=False)
 
 
 def render(linear: np.ndarray, recipe: Recipe, scale: float = 1.0) -> np.ndarray:
     """Apply a recipe to a decoded linear image. Returns uint8 sRGB HxWx3."""
-    return (render_float(linear, recipe, scale) * 255).round().astype(np.uint8)
+    x = render_float(linear, recipe, scale)
+    # Scale and round through one buffer: the naive expression keeps the
+    # float32 frame, the x255 product and the rounded product all alive at
+    # once, which at 24 MP is three 288 MB arrays for one uint8 result.
+    if not _owned(x, linear):
+        x = x.copy()
+    x *= 255
+    np.round(x, out=x)
+    return x.astype(np.uint8)

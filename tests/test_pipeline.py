@@ -165,3 +165,79 @@ def test_decode_cache_hands_out_read_only_arrays():
 
     with pytest.raises(ValueError):
         cache._store[("x", 0, True)] *= 2
+
+
+def _read_only_gradient():
+    img = gradient(48, 64)
+    img.flags.writeable = False
+    return img
+
+
+def test_render_never_writes_into_a_read_only_decode_cache_entry():
+    """Decoded arrays are handed out by reference and marked read-only, so any
+    op that started writing in place would raise here rather than quietly
+    poisoning every later render of the same file."""
+    from viberoom.recipe.schema import (
+        BrushMask,
+        BrushStroke,
+        LocalAdjustments,
+        Tone,
+    )
+
+    recipes = [
+        Recipe(),  # every op early-returns its input: the aliasing worst case
+        Recipe(whiteBalance=WhiteBalance(temp=7200, tint=8)),
+        Recipe(tone=Tone(exposure=0.5, contrast=30, clarity=20)),
+        Recipe(color=Color(saturation=40)),
+        Recipe(
+            masks=[
+                BrushMask(
+                    strokes=[BrushStroke(points=[(0.4, 0.4)], radius=0.15)],
+                    adjustments=LocalAdjustments(exposure=0.8),
+                )
+            ]
+        ),
+    ]
+    for recipe in recipes:
+        img = _read_only_gradient()
+        before = np.asarray(img).copy()
+        render(img, recipe)
+        np.testing.assert_array_equal(img, before)
+
+
+def test_render_float_leaves_a_writable_caller_array_alone():
+    """The in-place clip at the end of render_float may only touch buffers the
+    pipeline allocated itself — a caller's array is not one of them."""
+    from viberoom.engine.pipeline import render_float
+
+    img = gradient(16, 16) * 2.0  # out of range, so the final clip has work
+    before = img.copy()
+    out = render_float(img, Recipe())
+    np.testing.assert_array_equal(img, before)
+    assert out.dtype == np.float32 and out.max() <= 1.0
+
+
+def test_render_uint8_conversion_matches_the_unfused_expression():
+    from viberoom.engine.pipeline import render_float
+    from viberoom.recipe.schema import Tone
+
+    img = gradient(24, 32)
+    recipe = Recipe(tone=Tone(exposure=0.4, contrast=20), color=Color(vibrance=35))
+    reference = (render_float(img, recipe) * 255).round().astype(np.uint8)
+    np.testing.assert_array_equal(render(img, recipe), reference)
+
+
+def test_owned_rejects_everything_the_pipeline_did_not_allocate():
+    """`_owned` is the whole safety argument for the in-place clip and the
+    fused uint8 conversion. It has to reject the source array, views of it,
+    and read-only decode-cache entries — being writable is not enough."""
+    from viberoom.engine.pipeline import _owned
+
+    src = np.zeros((8, 8, 3), dtype=np.float32)
+    assert not _owned(src, src)
+    assert not _owned(src[2:6], src)  # a crop view still writes into src
+    frozen = np.zeros((8, 8, 3), dtype=np.float32)
+    frozen.flags.writeable = False
+    assert not _owned(frozen, src)
+    assert not _owned(np.zeros((8, 8, 3), dtype=np.float64), src)
+    assert _owned(np.zeros((8, 8, 3), dtype=np.float32), src)
