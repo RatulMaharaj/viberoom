@@ -65,6 +65,16 @@ export function Edit() {
 
   const local = source?.kind === 'local'
 
+  // Drop what is on screen the moment the photo changes. Both frames are
+  // state, so without this the *previous* photo stayed up until the new one
+  // resolved — several seconds of looking at the wrong image and no sign that
+  // anything was happening, which reads as the app being stuck rather than
+  // busy.
+  useEffect(() => {
+    setFastFrame(null)
+    setLocalFrame(null)
+  }, [id])
+
   useEffect(() => {
     if (!local || !id) return
     let stale = false
