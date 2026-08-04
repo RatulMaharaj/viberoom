@@ -14,8 +14,21 @@
 
 import type { LinearImage } from './types.ts'
 
-/** ~2 full-size 24 MP decodes, or a filmstrip's worth of preview-sized ones. */
-const DEFAULT_MAX_BYTES = 640 * 1024 * 1024
+/** Full-resolution decodes, which are enormous: 197 MB for a Canon CR3, 524 MB
+ *  for a Nikon Z7, 698 MB for a Sony ARW. Only one is ever wanted at a time —
+ *  a full decode exists to produce a preview-sized frame and is not needed
+ *  again until export — so this is sized to hold roughly one, and the
+ *  keep-what-was-just-inserted rule does the rest. */
+const DEFAULT_MAX_BYTES = 384 * 1024 * 1024
+
+/** Preview-sized frames, which are small: a 2048px frame is ~32 MB. These are
+ *  what makes going back to a photo instant, so they get the larger share and
+ *  a separate budget.
+ *
+ *  Sharing one budget with the full decodes was the bug: producing a single
+ *  preview allocated several hundred megabytes and evicted every frame worth
+ *  keeping, so arrowing back through a filmstrip re-ran LibRaw every time. */
+const FRAME_MAX_BYTES = 512 * 1024 * 1024
 
 export class DecodeCache {
   private store = new Map<string, LinearImage>()
@@ -73,6 +86,10 @@ export class DecodeCache {
 }
 
 export const decodeCache = new DecodeCache()
+
+/** Preview-sized frames. Separate from `decodeCache` on purpose — see the
+ *  budgets above. */
+export const frameCache = new DecodeCache(FRAME_MAX_BYTES)
 
 /**
  * Cache identity for a file.

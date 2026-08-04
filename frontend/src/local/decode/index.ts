@@ -7,7 +7,7 @@
  */
 
 import { decodeBitmapBlob } from './bitmap.ts'
-import { decodeCache, fileKey } from './cache.ts'
+import { decodeCache, fileKey, frameCache } from './cache.ts'
 import { linearToBitmap, orientBitmap } from './display.ts'
 import { downscaleLinear, previewScale } from './downscale.ts'
 import { metadataFromLibRaw, readExif, type ImageMetadata } from './exif.ts'
@@ -19,7 +19,7 @@ export type { LinearImage } from './types.ts'
 export type { SourceFormat, SourceFrame } from './source.ts'
 export type { ExifSummary, ImageMetadata, RawExif } from './exif.ts'
 export { metadataFromLibRaw, readExif } from './exif.ts'
-export { DecodeCache, decodeCache, fileKey } from './cache.ts'
+export { DecodeCache, decodeCache, fileKey, frameCache } from './cache.ts'
 export { linearToBitmap, orientBitmap } from './display.ts'
 export { downscaleLinear, previewScale, resizeLinear } from './downscale.ts'
 export { encodeRgb9e5, encodeRgba16f, encodeSource } from './source.ts'
@@ -120,7 +120,7 @@ export async function sourceFrame(
   // the Lanczos pass over 24 MP is not, and a slider drag asks for the same
   // size over and over.
   const key = fileKey(file, `|src${size}`)
-  const frame = await decodeCache.get(key, async () =>
+  const frame = await frameCache.get(key, async () =>
     downscaleLinear(full, previewScale(full, size)),
   )
   return encodeSource(frame, format)

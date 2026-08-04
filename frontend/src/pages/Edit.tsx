@@ -3,6 +3,7 @@ import { Crop, Download, Maximize, Minimize } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import { unsupportedReason } from '../local/unsupported'
+import { sourceFrame } from '../local/decode'
 import { getSource, type Flag, type ImageMeta, type PhotoSource, type SourceUrl } from '../source'
 import { useThumbnails } from '../local/useThumbnails'
 import { FlagBadge, RatingStars } from '../components/RatingStars'
@@ -156,6 +157,41 @@ export function Edit() {
   }, [id, navigate])
 
   const idx = id ? siblings.findIndex((im) => im.id === id) : -1
+
+  /**
+   * Decode the neighbours while this one is on screen.
+   *
+   * Arrow-keying through a folder is the common case and it was paying a full
+   * RAW decode — 0.6 to 9 seconds — at every step. The work cannot be made
+   * faster, but it can be done early: by the time the key is pressed the frame
+   * is usually already in `frameCache`, and the next photo appears at once.
+   *
+   * Deliberately after a delay and one at a time. Scrubbing through a filmstrip
+   * fires this on every image passed through, and starting a decode for each
+   * would fill the worker pool with work that is already stale.
+   */
+  useEffect(() => {
+    if (!local || idx < 0) return
+    const ahead = [siblings[idx + 1], siblings[idx - 1]].filter(Boolean)
+    if (!ahead.length) return
+    let cancelled = false
+    const timer = setTimeout(async () => {
+      const s = await getSource()
+      for (const im of ahead) {
+        if (cancelled) return
+        // Same size the loupe asks for, so this warms the entry it will want
+        // rather than one next to it.
+        await s
+          .getFile(im.id)
+          .then((f) => f && sourceFrame(f, zoomed ? 4096 : 2048))
+          .catch(() => {})
+      }
+    }, 400)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [local, idx, siblings, zoomed])
   const go = useCallback(
     (delta: number) => {
       const next = siblings[idx + delta]
