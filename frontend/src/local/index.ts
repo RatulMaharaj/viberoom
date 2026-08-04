@@ -123,9 +123,23 @@ function requireRoot(): FileSystemDirectoryHandle {
  *  reloading while on it — asks for one image without ever listing the folder,
  *  and every id-based method then threw "Unknown image" against an empty
  *  index. Cheap to call repeatedly: both steps are already idempotent. */
+let readying: Promise<void> | null = null
+
 async function ready(): Promise<void> {
-  root ??= await restoreLibrary()
-  if (root && index.size === 0) await buildIndex(root)
+  if (root && index.size > 0) return
+  // One walk, however many callers. Every id-based method waits on this, and a
+  // reload of the develop page calls it 45 times at once — one per filmstrip
+  // thumbnail — so without sharing the promise each of them walked the whole
+  // folder, with a getFile() and a sidecar read per photo. That is what made a
+  // reload crawl and the filmstrip come up empty, and why visiting the catalog
+  // appeared to fix it: by then one of the walks had finished.
+  readying ??= (async () => {
+    root ??= await restoreLibrary()
+    if (root && index.size === 0) await buildIndex(root)
+  })().finally(() => {
+    readying = null
+  })
+  return readying
 }
 
 function entry(id: string): Entry {
@@ -137,12 +151,25 @@ function entry(id: string): Entry {
 async function buildIndex(handle: FileSystemDirectoryHandle): Promise<void> {
   const files = await walkLibrary(handle)
   const next = new Map<string, Entry>()
-  for (const file of files) {
-    const sidecar = await loadSidecar(file)
-    // One File object per photo: it is the only place size and mtime live, and
-    // it is a handle to bytes, not the bytes themselves.
-    const f = await file.handle.getFile().catch(() => null)
-    next.set(file.id, {
+
+  // Two filesystem round-trips per photo, and they were awaited one after
+  // another — 2000 of them in sequence for a thousand-photo folder, which is
+  // most of what "opening a library is slow" was. They are metadata reads, not
+  // decodes, so they can run wide; the ceiling is only there to avoid opening
+  // a file handle for every photo in a large library at once.
+  const LANES = 16
+  const queue = [...files]
+  const build = async () => {
+    for (;;) {
+      const file = queue.shift()
+      if (!file) return
+      const [sidecar, f] = await Promise.all([
+        loadSidecar(file),
+        // One File object per photo: it is the only place size and mtime live,
+        // and it is a handle to bytes, not the bytes themselves.
+        file.handle.getFile().catch(() => null),
+      ])
+      next.set(file.id, {
       file,
       sidecar,
       summary: null,
@@ -163,9 +190,11 @@ async function buildIndex(handle: FileSystemDirectoryHandle): Promise<void> {
         rating: sidecar.rating,
         flag: sidecar.flag,
         has_edits: hasEdits(sidecar.recipe),
-      },
-    })
+        },
+      })
+    }
   }
+  await Promise.all(Array.from({ length: LANES }, build))
   index = next
   thumbBlobs.clear()
   backfill = null
