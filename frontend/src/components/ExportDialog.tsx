@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { Download, FolderOpen, Save, Trash2 } from 'lucide-react'
 import { api } from '../api'
 import { useFolderChooser } from '../folderChooser'
-import { getSource, type ExportProgress, type ExportReport, type ExportSettings, type PhotoSource } from '../source'
+import type { ExportProgress, ExportReport, ExportSettings } from '../source'
+import { useSource, useSourceMode } from '../stores/source'
 import { FolderPicker } from './FolderPicker'
 
 /** Full export panel: format, quality, bit depth, resize, colour space,
@@ -80,7 +81,8 @@ export function ExportDialog({
   onClose: () => void
 }) {
   const [s, setS] = useState<ExportSettings>(DEFAULTS)
-  const [source, setSource] = useState<PhotoSource | null>(null)
+  const source = useSource()
+  const mode = useSourceMode()
   const [presets, setPresets] = useState<Record<string, any>>({})
   const [presetName, setPresetName] = useState('')
   const [busy, setBusy] = useState(false)
@@ -92,21 +94,19 @@ export function ExportDialog({
   const [localDest, setLocalDest] = useState<string | null>(null)
 
   const many = imageIds.length > 1
-  const local = source?.kind === 'local'
+  const local = mode === 'local'
   const set = <K extends keyof ExportSettings>(k: K, v: ExportSettings[K]) =>
     setS((p) => ({ ...p, [k]: v }))
 
   useEffect(() => {
-    getSource().then((src) => {
-      setSource(src)
-      setLocalDest(src.exportDestinationName?.() ?? null)
-      // Presets are a server-side store; asking a static host for them just
-      // produces a confusing error in the console.
-      if (src.kind === 'server') {
-        api.listExportPresets().then((r) => setPresets(r.presets ?? {})).catch(() => setPresets({}))
-      }
-    })
-  }, [])
+    if (!source) return
+    setLocalDest(source.exportDestinationName?.() ?? null)
+    // Presets are a server-side store; asking a static host for them just
+    // produces a confusing error in the console.
+    if (source.kind === 'server') {
+      api.listExportPresets().then((r) => setPresets(r.presets ?? {})).catch(() => setPresets({}))
+    }
+  }, [source])
 
   // Only PNG supports 16-bit, on either back end; don't let the form build a
   // request the exporter will reject.

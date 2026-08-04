@@ -5,7 +5,8 @@ import { api } from '../api'
 import { unsupportedReason } from '../local/unsupported'
 import { sourceFrame } from '../local/decode'
 import { decodeBusy, regrantLibrary } from '../local'
-import { getSource, type Flag, type ImageMeta, type PhotoSource, type SourceUrl } from '../source'
+import { getSource, type Flag, type ImageMeta, type SourceUrl } from '../source'
+import { useSource, useSourceMode } from '../stores/source'
 import { useThumbnails } from '../local/useThumbnails'
 import { FlagBadge, RatingStars } from '../components/RatingStars'
 import { Brand } from '../components/Brand'
@@ -31,7 +32,8 @@ const GPU_PREVIEW_SIZE = 2048
 export function Edit() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const [source, setSource] = useState<PhotoSource | null>(null)
+  const source = useSource()
+  const mode = useSourceMode()
   /** Local mode, reloaded, folder permission lapsed — one click from working. */
   const [needsLibrary, setNeedsLibrary] = useState(false)
 
@@ -63,7 +65,7 @@ export function Edit() {
   const [fastFrame, setFastFrame] = useState<SourceUrl | null>(null)
 
 
-  const local = source?.kind === 'local'
+  const local = mode === 'local'
 
   // Drop what is on screen the moment the photo changes. Both frames are
   // state, so without this the *previous* photo stayed up until the new one
@@ -106,10 +108,7 @@ export function Edit() {
     // Locally there is no server render to swap in and no `/source` endpoint
     // to feed the renderer, so this hook stays off entirely; `local/preview.ts`
     // drives the same GPU chain from the file itself instead.
-    // `kind === 'server'` and not `!local`: source starts null while the probe
-    // is in flight, so `!local` is true before we know anything — and this hook
-    // would fire /source and /preview at a backend that is not there.
-    enabled: source?.kind === 'server' && !proof && !showBefore && !cropMode && !zoomed,
+    enabled: mode === 'server' && !proof && !showBefore && !cropMode && !zoomed,
     commitTick,
   })
 
@@ -154,15 +153,13 @@ export function Edit() {
 
 
   useEffect(() => {
-    getSource().then(async (s) => {
-      setSource(s)
-      // A reload lands here with no library: the handle survives in IndexedDB
-      // but its permission does not, and re-granting needs a click the browser
-      // will only accept from a real gesture. Asking here beats bouncing to
-      // the catalog, which threw away the photo you were looking at.
-      if (s.kind === 'local') setNeedsLibrary(!(await s.getLibrary()).library)
-    })
-  }, [navigate])
+    // A reload lands here with no library: the handle survives in IndexedDB
+    // but its permission does not, and re-granting needs a click the browser
+    // will only accept from a real gesture. Asking here beats bouncing to
+    // the catalog, which threw away the photo you were looking at.
+    if (!source || source.kind !== 'local') return
+    source.getLibrary().then((r) => setNeedsLibrary(!r.library))
+  }, [source])
 
   useEffect(() => {
     load()
@@ -253,15 +250,11 @@ export function Edit() {
   // live refresh when an agent (or anything) edits sidecars on disk;
   // server-only, since the event stream is one of its endpoints
   useEffect(() => {
-    // `!source` as well as `local`: source is null while the probe is in
-    // flight, so `local` is false before anything is known — and opening the
-    // stream then means an EventSource pointed at a static host, which
-    // answers with HTML and logs a MIME-type error on every load.
-    if (!source || local) return
+    if (mode !== 'server') return
     return onSidecarChange((ids) => {
       if (id && ids.includes(id)) refreshAll()
     })
-  }, [id, source, local, refreshAll])
+  }, [id, mode, refreshAll])
 
   /** Render the loupe frame locally. Re-runs on anything that changes which
    *  pixels are wanted; the previous blob is revoked as it goes. */

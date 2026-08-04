@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { FolderOpen } from 'lucide-react'
 import { api } from '../api'
 import { getSource } from '../source'
+import { useSource, useSourceMode } from '../stores/source'
 import { useFolderChooser } from '../folderChooser'
 import { FolderPicker } from './FolderPicker'
 
@@ -11,20 +12,17 @@ import { FolderPicker } from './FolderPicker'
 export function Brand({ showFolder = true }: { showFolder?: boolean }) {
   const [libraryPath, setLibraryPath] = useState<string | null>(null)
   const [showPicker, setShowPicker] = useState(false)
-  const [local, setLocal] = useState(false)
+  const source = useSource()
+  const mode = useSourceMode()
   const { available: nativePicker, choose } = useFolderChooser()
 
   useEffect(() => {
     // Through the seam, not the API: with no backend `api.getLibrary()`
     // resolves to the app shell, and this had no catch — an unhandled
     // rejection on every load of the PWA.
-    getSource()
-      .then(async (s) => {
-        setLocal(s.kind !== 'server')
-        setLibraryPath((await s.getLibrary()).library)
-      })
-      .catch(() => {})
-  }, [])
+    if (!source) return
+    source.getLibrary().then((r) => setLibraryPath(r.library)).catch(() => {})
+  }, [source])
 
   const openLibrary = async (path: string) => {
     await api.setLibrary(path)
@@ -35,8 +33,10 @@ export function Brand({ showFolder = true }: { showFolder?: boolean }) {
    *  server-side dialog to open — the browser's own picker is the only thing
    *  that can see the disk, and it needs to be called from the click. */
   const chooseFolder = async () => {
-    if (local) {
-      const s = await getSource()
+    // Awaited rather than read off `mode`: this runs from a click, so it can
+    // afford to wait for the real answer instead of guessing at one.
+    const s = await getSource()
+    if (s.kind === 'local') {
       const opened = await s.openLibrary()
       if (opened.library) window.location.href = '/'
       return
@@ -64,7 +64,7 @@ export function Brand({ showFolder = true }: { showFolder?: boolean }) {
         </span>
       </button>
       )}
-      {showFolder && showPicker && !local && (
+      {showFolder && showPicker && mode === 'server' && (
         <FolderPicker
           onSelect={openLibrary}
           onClose={() => setShowPicker(false)}

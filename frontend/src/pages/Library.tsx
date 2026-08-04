@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { Boxes, ArrowDown, ArrowUp, CheckSquare, Download, FolderOpen, RefreshCw, Square } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { getSource, type Filters, type Flag, type ImageMeta, type PhotoSource } from '../source'
+import { getSource, type Filters, type Flag, type ImageMeta } from '../source'
+import { useSource, useSourceMode } from '../stores/source'
 import { Brand } from '../components/Brand'
 import { ImageCard } from '../components/ImageCard'
 import { useFolderChooser } from '../folderChooser'
@@ -17,7 +18,6 @@ import { loadLastImage, saveLastImage } from '../selection'
 import { handleUndoKey, pushAction } from '../undo'
 
 export function Library() {
-  const [source, setSource] = useState<PhotoSource | null>(null)
   const [libraryPath, setLibraryPath] = useState<string | null>(null)
   const [pathInput, setPathInput] = useState('')
   const [images, setImages] = useState<ImageMeta[]>([])
@@ -51,9 +51,12 @@ export function Library() {
     [images, idFilterSet],
   )
 
+  const source = useSource()
+  const mode = useSourceMode()
   // Local thumbnails are decoded blobs with a lifetime; server ones are URLs.
-  // Only the local build pays for the hook.
-  const local = source?.kind === 'local'
+  // Only the local build pays for the hook. Safe to collapse to a boolean:
+  // while the mode is unknown there is no source to decode from either.
+  const local = mode === 'local'
 
   const refresh = useCallback(() => {
     getSource()
@@ -63,27 +66,21 @@ export function Library() {
   }, [filters])
 
   useEffect(() => {
-    getSource().then((s) => {
-      setSource(s)
-      return s.getLibrary().then((r) => {
-        setLibraryPath(r.library)
-        if (r.library) {
-          refresh()
-          s.listExts().then(setExts)
-        }
-      })
+    if (!source) return
+    source.getLibrary().then((r) => {
+      setLibraryPath(r.library)
+      if (r.library) {
+        refresh()
+        source.listExts().then(setExts)
+      }
     })
-  }, [refresh])
+  }, [source, refresh])
 
   // Live refresh when agents edit sidecars on disk. Server-only: the event
   // stream is an endpoint, and locally nothing else is writing the folder.
-  // `source` and not `local`: local starts false while the probe is in flight,
-  // so keying on it alone opened the stream before we knew there was nothing
-  // to stream from — and a static host answers /events with HTML, which
-  // EventSource rejects loudly.
   useEffect(
-    () => (!source || local ? undefined : onSidecarChange(() => refresh())),
-    [source, local, refresh],
+    () => (mode === 'server' ? onSidecarChange(() => refresh()) : undefined),
+    [mode, refresh],
   )
 
   // Locally, EXIF lands after the grid has already painted — see the backfill

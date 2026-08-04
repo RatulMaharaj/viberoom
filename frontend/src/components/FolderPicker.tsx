@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus } from 'lucide-react'
 import { api } from '../api'
-import { getSource } from '../source'
+import { useSourceMode } from '../stores/source'
 
 interface NodeProps {
   path: string
@@ -160,10 +160,7 @@ export function FolderPicker({
     }
   }
 
-  const [localMode, setLocalMode] = useState(false)
-  useEffect(() => {
-    getSource().then((s) => setLocalMode(s.kind !== 'server')).catch(() => setLocalMode(true))
-  }, [])
+  const mode = useSourceMode()
 
   useEffect(() => {
     // This browses the *server's* filesystem. With no backend there is nothing
@@ -171,10 +168,14 @@ export function FolderPicker({
     // shell" answer for /api/v1/fs surfaces as an error to the user. Checked
     // here rather than at each call site: three components render this, and
     // the next one to do so should not have to remember.
-    if (localMode) {
+    if (mode === 'local') {
       setError('Browsing folders needs the desktop app — use "Choose a folder" instead.')
       return
     }
+    // And nothing at all until we know which it is: this used to fire at
+    // /api/v1/fs on mount, before the probe had answered, for the same reason
+    // the other three did.
+    if (mode === 'unknown') return
     api
       .browseFs(undefined, hidden)
       .then((r) => {
@@ -191,7 +192,7 @@ export function FolderPicker({
       })
       .catch((e) => setError(String(e)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, hidden, localMode])
+  }, [current, hidden, mode])
 
   return (
     <dialog className="modal modal-open">
