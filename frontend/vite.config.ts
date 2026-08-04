@@ -46,7 +46,9 @@ function serviceWorker(): Plugin {
 
       // index.html is not in `bundle` yet — Vite emits it after this hook — but
       // it is the shell every offline navigation is answered with.
-      const precache = [base, `${base}index.html`, ...assets, ...PUBLIC_PRECACHE.map((f) => base + f), ...fonts]
+      // `base` only: /index.html redirects to / on most static hosts, and a
+      // cached redirect cannot be served to a navigation.
+      const precache = [base, ...assets, ...PUBLIC_PRECACHE.map((f) => base + f), ...fonts]
       // Any asset hash change changes this, which changes the cache name, which
       // is what makes the waiting worker a *new* worker the browser notices.
       const version = createHash('sha256').update(precache.join('\n')).digest('hex').slice(0, 12)

@@ -14,7 +14,12 @@ const VERSION = '__VERSION__'
 const PRECACHE = __PRECACHE__
 
 const CACHE = `viberoom-${VERSION}`
-const SHELL = `${BASE}index.html`
+// The base URL, not `${BASE}index.html`. Hosts that serve static assets
+// commonly redirect /index.html to / — Cloudflare answers it with a 307 — so
+// caching that path stores a *redirected* response, and handing a redirected
+// response to a navigation is rejected outright by the browser. Every route
+// then fails to load while the site itself is perfectly healthy.
+const SHELL = BASE
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -70,7 +75,23 @@ self.addEventListener('fetch', (event) => {
   if (request.mode === 'navigate') {
     // SPA routes (/edit/:id) have no file behind them; the shell is the answer
     // for every navigation, exactly as SPAStaticFiles does server-side.
-    event.respondWith(caches.open(CACHE).then((c) => c.match(SHELL)).then((hit) => hit || fetch(request)))
+    event.respondWith(
+      caches
+        .open(CACHE)
+        .then((c) => c.match(SHELL))
+        // Belt and braces for the same trap: anything that did arrive via a
+        // redirect is rebuilt into a plain response before it reaches a
+        // navigation, because the browser refuses the redirected one.
+        .then(async (hit) => {
+          if (!hit) return fetch(request)
+          if (!hit.redirected) return hit
+          return new Response(await hit.blob(), {
+            status: hit.status,
+            statusText: hit.statusText,
+            headers: hit.headers,
+          })
+        }),
+    )
     return
   }
 
