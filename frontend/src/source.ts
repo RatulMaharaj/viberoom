@@ -47,6 +47,11 @@ export interface PreviewOpts {
   /** Keep every edit but ignore the crop, so the crop tool can show what is
    *  being cropped *out*. */
   nocrop?: boolean
+  /** Whatever can be shown *now*, rather than what is correct. The camera's
+   *  embedded JPEG costs a container parse instead of the 0.6-9s a RAW decode
+   *  takes, so it stands in while the real frame is prepared. It does not
+   *  reflect the recipe, so it is only ever a placeholder. */
+  fast?: boolean
 }
 
 /** Everything the export dialog can ask for. A superset of what the browser

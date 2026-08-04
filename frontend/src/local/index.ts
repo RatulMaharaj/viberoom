@@ -385,6 +385,12 @@ async function previewUrl(id: string, opts: PreviewOpts): Promise<SourceUrl> {
   const e = entry(id)
   try {
     const file = await e.file.handle.getFile()
+    if (opts.fast) {
+      // The camera's own rendering, at whatever size it embedded. Not the
+      // recipe and not our pipeline — a stand-in, and the caller knows it.
+      const bitmap = await decodeToBitmap(file, e.file.ext, opts.size ?? 1600)
+      return blobUrl(await bitmapToBlob(bitmap), 'original')
+    }
     const out = await limit(() =>
       renderPreview(file, e.sidecar.recipe, opts.size ?? 1600, opts.original ?? false, opts.nocrop ?? false),
     )

@@ -69,7 +69,7 @@ export function Edit() {
     if (!local || !id) return
     let stale = false
     getSource()
-      .then((s) => s.thumbnail(id))
+      .then((s) => s.preview(id, { size: 1600, fast: true }))
       .then((f) => (stale ? f.release() : setFastFrame(f)))
       .catch(() => {})
     return () => {
@@ -393,7 +393,7 @@ export function Edit() {
           <img
             src={fastFrame.url}
             alt=""
-            className="max-h-full max-w-full object-contain blur-sm opacity-80"
+            className="max-h-full max-w-full object-contain blur-[2px] opacity-90"
           />
         )}
         {id && source && local && !localFrame && !fastFrame && (
