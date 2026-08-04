@@ -89,15 +89,30 @@ export async function renderPreview(
     const r = recipe as Record<string, any>
     recipe = { ...r, geometry: { ...r.geometry, crop: { left: 0, top: 0, right: 1, bottom: 1 } } }
   }
+  // `?debug=1` breaks the wait into its parts. "Switching is slow" can mean
+  // the decode, the resample, the texture packing, the draw or the JPEG
+  // encode, and they are fixed in completely different places.
+  const t = typeof location !== 'undefined' && new URLSearchParams(location.search).has('debug')
+    ? (label: string, at: number) => console.log(`[preview] ${label} ${Math.round(performance.now() - at)}ms`)
+    : () => {}
+
   const drawable = !original && gpuEnabled() && gpuSupportsRecipe(recipe)
   if (drawable) {
     try {
+      const t0 = performance.now()
       const frame = await sourceFrame(file, size)
+      t(`frame (decode+resize+pack) ${file.name}`, t0)
       const gpu = acquire()
       if (gpu) {
+        const t1 = performance.now()
         gpu.setSource(frame)
         gpu.render(recipe)
-        return { blob: await snapshot(canvas!), rendered: 'gpu' }
+        t('upload+render', t1)
+        const t2 = performance.now()
+        const blob = await snapshot(canvas!)
+        t('jpeg encode', t2)
+        t('TOTAL', t0)
+        return { blob, rendered: 'gpu' }
       }
     } catch {
       // A decode that failed, a context lost mid-render: fall through to the

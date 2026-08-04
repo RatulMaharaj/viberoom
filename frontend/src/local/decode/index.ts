@@ -110,18 +110,56 @@ export async function thumbnailBitmap(file: File, maxWidth: number): Promise<Ima
  * the pipeline would render a preview at, not to `size` itself, so that a
  * client-rendered frame and a later full render depict the same image.
  */
+/** Encoded frames, ready to hand straight to the GPU.
+ *
+ *  What is cached is the *packed* frame, not the linear one. Encoding was
+ *  outside the cache, so every revisit re-packed several million pixels into
+ *  RGB9_E5 in JavaScript before anything could be drawn — the decode was
+ *  cached and the wait stayed. Packed is also the smaller of the two: 4 bytes
+ *  per pixel against float32's 12, so an 11 MB entry replaces a 32 MB one.
+ *
+ *  Bounded by count rather than bytes because these are all one of two sizes.
+ *  Sixteen covers arrowing back and forth through a filmstrip. */
+const encodedFrames = new Map<string, SourceFrame>()
+const ENCODED_LIMIT = 16
+
 export async function sourceFrame(
   file: File,
   size: number,
   format: SourceFormat = 'rgb9e5',
 ): Promise<SourceFrame> {
+  const key = fileKey(file, `|src${size}|${format}`)
+  const hit = encodedFrames.get(key)
+  if (hit) {
+    // Re-insert so the LRU order reflects use, not arrival.
+    encodedFrames.delete(key)
+    encodedFrames.set(key, hit)
+    return hit
+  }
+
+  const dbg = typeof location !== 'undefined'
+    && new URLSearchParams(location.search).has('debug')
+  const mark = (label: string, at: number) =>
+    dbg && console.log(`[frame] ${label} ${Math.round(performance.now() - at)}ms`)
+
+  const t0 = performance.now()
   const full = await decodeCached(file)
-  // Downscaled frames are cached too. Encoding is cheap next to decoding, but
-  // the Lanczos pass over 24 MP is not, and a slider drag asks for the same
-  // size over and over.
-  const key = fileKey(file, `|src${size}`)
-  const frame = await frameCache.get(key, async () =>
+  mark(`decode ${full.width}x${full.height}`, t0)
+
+  // The Lanczos pass over 24 MP is not cheap either, so the linear frame stays
+  // cached as well — the export path asks for it at a different size.
+  const t1 = performance.now()
+  const frame = await frameCache.get(fileKey(file, `|src${size}`), async () =>
     downscaleLinear(full, previewScale(full, size)),
   )
-  return encodeSource(frame, format)
+  mark(`resize -> ${frame.width}x${frame.height}`, t1)
+
+  const t2 = performance.now()
+  const encoded = encodeSource(frame, format)
+  mark('pack', t2)
+  encodedFrames.set(key, encoded)
+  while (encodedFrames.size > ENCODED_LIMIT) {
+    encodedFrames.delete(encodedFrames.keys().next().value as string)
+  }
+  return encoded
 }

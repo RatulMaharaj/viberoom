@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import { unsupportedReason } from '../local/unsupported'
 import { sourceFrame } from '../local/decode'
+import { decodeBusy } from '../local'
 import { getSource, type Flag, type ImageMeta, type PhotoSource, type SourceUrl } from '../source'
 import { useThumbnails } from '../local/useThumbnails'
 import { FlagBadge, RatingStars } from '../components/RatingStars'
@@ -179,6 +180,11 @@ export function Edit() {
       const s = await getSource()
       for (const im of ahead) {
         if (cancelled) return
+        // Stand down while anything is decoding for real. On a reload the
+        // filmstrip wants forty-odd thumbnails, and reading ahead is worth
+        // nothing next to the tiles someone is waiting to see — each RAW
+        // decode is a worker with its own wasm heap.
+        if (decodeBusy()) return
         // Same size the loupe asks for, so this warms the entry it will want
         // rather than one next to it.
         await s
@@ -222,11 +228,15 @@ export function Edit() {
   // live refresh when an agent (or anything) edits sidecars on disk;
   // server-only, since the event stream is one of its endpoints
   useEffect(() => {
-    if (local) return
+    // `!source` as well as `local`: source is null while the probe is in
+    // flight, so `local` is false before anything is known — and opening the
+    // stream then means an EventSource pointed at a static host, which
+    // answers with HTML and logs a MIME-type error on every load.
+    if (!source || local) return
     return onSidecarChange((ids) => {
       if (id && ids.includes(id)) refreshAll()
     })
-  }, [id, local, refreshAll])
+  }, [id, source, local, refreshAll])
 
   /** Render the loupe frame locally. Re-runs on anything that changes which
    *  pixels are wanted; the previous blob is revoked as it goes. */

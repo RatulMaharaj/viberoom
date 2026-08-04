@@ -88,6 +88,13 @@ const MAX_DECODES = 4
 let running = 0
 const waiting: (() => void)[] = []
 
+/** Decodes in progress or queued. Speculative work — reading ahead to the next
+ *  photo — checks this and stands down, so it never competes with the tiles and
+ *  frames someone is actually waiting to see. */
+export function decodeBusy(): boolean {
+  return running > 0 || waiting.length > 0
+}
+
 async function limit<T>(work: () => Promise<T>): Promise<T> {
   if (running >= MAX_DECODES) await new Promise<void>((r) => waiting.push(r))
   running++

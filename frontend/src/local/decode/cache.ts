@@ -32,6 +32,9 @@ const FRAME_MAX_BYTES = 512 * 1024 * 1024
 
 export class DecodeCache {
   private store = new Map<string, LinearImage>()
+  /** Decodes already running, so two callers wanting the same file wait on one
+   *  of them instead of each starting their own. */
+  private inflight = new Map<string, Promise<LinearImage>>()
   private bytes = 0
   private maxBytes: number
 
@@ -39,12 +42,16 @@ export class DecodeCache {
     this.maxBytes = maxBytes
   }
 
-  /** Decoded frame for `key`, running `decode` only on a miss.
+  /** Decoded frame for `key`, running `decode` only on a miss — and only once
+   *  even when several callers miss at the same moment.
    *
-   * In-flight decodes are not deduplicated here — the caller owns request
-   * lifetimes (an abandoned loupe navigation should not keep a decode alive),
-   * and a duplicate decode is merely slow, whereas a shared promise that
-   * outlives its abort is a leak. */
+   *  This used to let concurrent misses each run their own decode, on the
+   *  grounds that a duplicate is merely slow while a shared promise outliving
+   *  an abort would leak. Measurement disagreed: opening one photo decoded it
+   *  twice, because the loupe and the live-preview hook ask together — 2.4s
+   *  then a further 3.0s for the same Canon file. Sharing leaks nothing, since
+   *  a decode already running finishes regardless of who is still waiting, and
+   *  its result lands in a cache bounded by bytes. */
   async get(key: string, decode: () => Promise<LinearImage>): Promise<LinearImage> {
     const hit = this.store.get(key)
     if (hit) {
@@ -53,9 +60,18 @@ export class DecodeCache {
       this.store.set(key, hit)
       return hit
     }
-    const img = await decode()
-    this.put(key, img)
-    return img
+
+    const running = this.inflight.get(key)
+    if (running) return running
+
+    const started = decode()
+      .then((img) => {
+        this.put(key, img)
+        return img
+      })
+      .finally(() => this.inflight.delete(key))
+    this.inflight.set(key, started)
+    return started
   }
 
   put(key: string, img: LinearImage): void {
