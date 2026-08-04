@@ -4,7 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import { unsupportedReason } from '../local/unsupported'
 import { sourceFrame } from '../local/decode'
-import { decodeBusy } from '../local'
+import { decodeBusy, regrantLibrary } from '../local'
 import { getSource, type Flag, type ImageMeta, type PhotoSource, type SourceUrl } from '../source'
 import { useThumbnails } from '../local/useThumbnails'
 import { FlagBadge, RatingStars } from '../components/RatingStars'
@@ -14,6 +14,7 @@ import { ExportDialog } from '../components/ExportDialog'
 import { EditPanel } from '../components/EditPanel'
 import { Filmstrip } from '../components/Filmstrip'
 import { GpuPreview } from '../components/GpuPreview'
+import { LibraryPicker } from '../components/LibraryPicker'
 import { ModuleTabs } from '../components/ModuleTabs'
 import { ZoomableImage } from '../components/ZoomableImage'
 import { createLiveRecipe } from '../gpu'
@@ -31,6 +32,9 @@ export function Edit() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [source, setSource] = useState<PhotoSource | null>(null)
+  /** Local mode, reloaded, folder permission lapsed — one click from working. */
+  const [needsLibrary, setNeedsLibrary] = useState(false)
+
   const [image, setImage] = useState<ImageMeta | null>(null)
   const [siblings, setSiblings] = useState<ImageMeta[]>([])
   const [bust, setBust] = useState('')
@@ -126,16 +130,27 @@ export function Edit() {
     if (id) getSource().then((s) => s.getImage(id)).then(setImage).catch(() => {})
   }, [id])
 
+  /** `pick` chooses a folder afresh; otherwise re-grant the one already stored.
+   *  Either way the index is rebuilt, so the page can just carry on. */
+  const reconnect = useCallback(async (pick: boolean) => {
+    const s = await getSource()
+    if (pick) await s.openLibrary()
+    else await regrantLibrary()
+    if ((await s.getLibrary()).library) {
+      setNeedsLibrary(false)
+      load()
+    }
+  }, [load])
+
+
   useEffect(() => {
     getSource().then(async (s) => {
       setSource(s)
-      // A reload lands here with no library: the folder handle survives in
-      // IndexedDB but its permission does not, and re-granting needs a click
-      // the browser will only accept from a real gesture. There is nowhere on
-      // this page to ask, so hand back to the catalog, which has the reconnect
-      // button — otherwise every lookup fails with "Unknown image" and the
-      // page just looks broken.
-      if (s.kind === 'local' && !(await s.getLibrary()).library) navigate('/')
+      // A reload lands here with no library: the handle survives in IndexedDB
+      // but its permission does not, and re-granting needs a click the browser
+      // will only accept from a real gesture. Asking here beats bouncing to
+      // the catalog, which threw away the photo you were looking at.
+      if (s.kind === 'local') setNeedsLibrary(!(await s.getLibrary()).library)
     })
   }, [navigate])
 
@@ -307,6 +322,23 @@ export function Edit() {
     const write = (f: Flag) => getSource().then((s) => s.setFlag(id, f))
     pushAction({ undo: () => write(prev), redo: () => write(flag) })
     write(flag).then(load)
+  }
+
+  if (needsLibrary) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <p className="opacity-70 text-sm max-w-sm">
+            Reconnect your photo folder to carry on. The browser asks again after
+            a reload, and only a click can answer it.
+          </p>
+          <LibraryPicker
+            onOpen={() => reconnect(true)}
+            onReconnect={() => reconnect(false)}
+          />
+        </div>
+      </div>
+    )
   }
 
   return (
