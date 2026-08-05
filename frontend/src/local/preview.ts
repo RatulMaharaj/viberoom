@@ -15,6 +15,7 @@
  *  recipe is not.
  */
 
+import { defaultRecipe } from './recipe'
 import { GpuRenderer, gpuEnabled, gpuSupportsRecipe } from '../gpu'
 import { sourceFrame, thumbnailBitmap } from './decode'
 
@@ -96,7 +97,13 @@ export async function renderPreview(
     ? (label: string, at: number) => console.log(`[preview] ${label} ${Math.round(performance.now() - at)}ms`)
     : () => {}
 
-  const drawable = !original && gpuEnabled() && gpuSupportsRecipe(recipe)
+  // "Before" is the default recipe through the same chain, which is what the
+  // server means by `original=true` (`main.py`: `recipe = Recipe()`). It is
+  // *not* the camera's embedded JPEG: that carries the camera's own tone curve
+  // and none of our geometry, so toggling would have swapped the rendering as
+  // well as the edits and made the comparison meaningless.
+  if (original) recipe = defaultRecipe()
+  const drawable = gpuEnabled() && gpuSupportsRecipe(recipe)
   if (drawable) {
     try {
       const t0 = performance.now()

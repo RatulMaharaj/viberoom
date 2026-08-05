@@ -436,8 +436,14 @@ export function Edit() {
             // CSS delta must not be layered on top of it as well.
             // ...and locally, neither is the CSS delta honest when the frame
             // underneath is the untouched original rather than the last render.
+            // ...and the before view is the *point of comparison*: layering
+            // uncommitted slider deltas onto it would edit the thing the edits
+            // are being judged against.
             filter={
-              gpuMode === 'gpu' || (local && localFrame?.rendered === 'original') ? '' : liveFilter
+              gpuMode === 'gpu' || showBefore
+                || (local && localFrame?.rendered === 'original')
+                ? ''
+                : liveFilter
             }
             hideImage={gpuMode === 'gpu'}
             // Two canvases rather than one shared ref: only ever one of the
