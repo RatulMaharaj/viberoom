@@ -50,6 +50,11 @@ export function Edit() {
   const [proof, setProof] = useState<string | null>(null)
   const [exportOpen, setExportOpen] = useState(false)
   const [commitTick, setCommitTick] = useState(0)
+  // Whether the strip is open outlives the page: closing it is a working
+  // preference ("I want the pixels"), not a per-photo one.
+  const [stripOpen, setStripOpen] = useState(
+    () => localStorage.getItem('viberoom.filmstrip') !== 'closed',
+  )
   /** The rendered frame in the no-server build, where there is no `/preview`
    *  to point an <img> at and the blob has to be released by hand. */
   /** The local frame, plus whether the *user* asked for the original. Kept
@@ -231,7 +236,7 @@ export function Edit() {
   const openImage = useCallback((next: string) => navigate(`/edit/${next}`), [navigate])
 
   // Empty in server mode, where the filmstrip keeps its plain thumbnail URLs.
-  const stripThumbs = useThumbnails(source, siblings, local)
+  const stripThumbs = useThumbnails(source, siblings, local && stripOpen)
 
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) {
@@ -280,6 +285,13 @@ export function Edit() {
   // above, so a frame is never released while it is still the one on screen.
   useEffect(() => () => localFrame?.release(), [localFrame])
 
+  const toggleStrip = useCallback(() => {
+    setStripOpen((v) => {
+      localStorage.setItem('viberoom.filmstrip', v ? 'closed' : 'open')
+      return !v
+    })
+  }, [])
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey) {
@@ -295,6 +307,7 @@ export function Edit() {
       else if (e.key.toLowerCase() === 'f') toggleFullscreen()
       else if (e.key === '\\' || e.key === '|') setShowBefore((v) => !v)
       else if (e.key.toLowerCase() === 'c') setCropMode(true)
+      else if (e.key.toLowerCase() === 't') toggleStrip()
       else if (e.key === 'Escape' || e.key.toLowerCase() === 'g') {
         // browser handles exiting native fullscreen on Esc itself
         if (!document.fullscreenElement) navigate('/')
@@ -310,7 +323,7 @@ export function Edit() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [go, id, image, load, navigate, toggleFullscreen, refreshAll, cropMode])
+  }, [go, id, image, load, navigate, toggleFullscreen, refreshAll, cropMode, toggleStrip])
 
   const setRating = (rating: number) => {
     if (!id || !image) return
@@ -528,6 +541,9 @@ export function Edit() {
           id={id}
           idx={idx}
           thumbSrcs={local ? stripThumbs : undefined}
+          local={local}
+          open={stripOpen}
+          onToggle={toggleStrip}
           onPick={openImage}
         />
       )}

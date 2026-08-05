@@ -1,4 +1,5 @@
 import { memo, useMemo, useState } from 'react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import { api, type ImageMeta } from '../api'
 import { cameraLine, exifLine } from '../exif'
 
@@ -49,6 +50,8 @@ export function Filmstrip({
   idx,
   thumbSrcs,
   local,
+  open,
+  onToggle,
   onPick,
 }: {
   siblings: ImageMeta[]
@@ -58,6 +61,8 @@ export function Filmstrip({
   /** id -> tile URL, in the no-server build only. */
   thumbSrcs?: Record<string, string>
   local?: boolean
+  open: boolean
+  onToggle: () => void
   onPick: (id: string) => void
 }) {
   const [hovered, setHovered] = useState<ImageMeta | null>(null)
@@ -101,10 +106,25 @@ export function Filmstrip({
             </span>
           </>
         )}
+        {/* Sits outside the `info` guard: with no image loaded there is still a
+            closed strip to reopen, and a control that vanishes when you need it
+            is worse than no control. */}
+        {!info && <div className="flex-1" />}
+        <button
+          className="btn btn-ghost btn-xs px-1"
+          onClick={onToggle}
+          title={open ? 'Hide filmstrip (T)' : 'Show filmstrip (T)'}
+          aria-label={open ? 'Hide filmstrip' : 'Show filmstrip'}
+          aria-expanded={open}
+        >
+          {open ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+        </button>
       </div>
-      <div className="h-24 shrink-0 bg-base-200 flex gap-1 items-center overflow-x-auto px-2">
-        {thumbs}
-      </div>
+      {open && (
+        <div className="h-24 shrink-0 bg-base-200 flex gap-1 items-center overflow-x-auto px-2">
+          {thumbs}
+        </div>
+      )}
     </>
   )
 }
