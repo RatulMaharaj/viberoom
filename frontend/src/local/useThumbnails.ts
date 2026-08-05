@@ -48,6 +48,7 @@ export function useThumbnails(
     }
 
     const queue = [...ids]
+    let done = 0
     const lane = async () => {
       for (;;) {
         const id = queue.shift()
@@ -59,11 +60,27 @@ export function useThumbnails(
           return
         }
         held.push(got)
+        done += 1
         pending[id] = got.url
         timer ??= setTimeout(flush, FLUSH_MS)
       }
     }
-    void Promise.all(Array.from({ length: LANES }, lane)).then(flush)
+    // `?debug=1` says how many of the requested tiles actually arrived, and
+    // how long it took. "Not all the previews show" has at least three
+    // different causes — decodes failing, decodes never starting, or results
+    // arriving after the effect was torn down — and they are indistinguishable
+    // by eye.
+    const dbg = new URLSearchParams(window.location.search).has('debug')
+    const started = performance.now()
+    void Promise.all(Array.from({ length: LANES }, lane)).then(() => {
+      flush()
+      if (dbg) {
+        console.log(
+          `[thumbs] ${done}/${ids.length} in ${Math.round(performance.now() - started)}ms` +
+            (cancelled ? ' (torn down mid-flight)' : ''),
+        )
+      }
+    })
 
     return () => {
       cancelled = true

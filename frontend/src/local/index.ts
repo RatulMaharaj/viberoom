@@ -540,10 +540,19 @@ export const LocalSource: PhotoSource = {
   },
 
   async listExts() {
+    // Same reason as listImages: derived from the walk, so it has to wait for
+    // one. Without this the type filter comes up empty on a fresh load.
+    await ready()
     return [...new Set([...index.values()].map((e) => e.meta.ext))].sort()
   },
 
   async listImages(filters: Filters = {}) {
+    // The folder has to have been walked before there is anything to list.
+    // Missing this was why reloading the develop page showed a filmstrip of
+    // one: getImage waits, so the open photo appeared, while the sibling list
+    // read an index that was still empty. Visiting the catalog looked like a
+    // fix because it built the index on the way past.
+    await ready()
     // Only a query that actually reads EXIF waits for the backfill. The common
     // case — no filter, or rating and flag, which live in the sidecar — answers
     // from the walk alone and paints immediately.
